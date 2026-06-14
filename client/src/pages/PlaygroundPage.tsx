@@ -147,7 +147,7 @@ export default function PlaygroundPage() {
     <div className="flex flex-col h-[calc(100vh-8rem)]">
       <PageHeader
         title="游乐场"
-        description="测试兼容 OpenAI 的路由器（文本和视觉）。客户端设置在「指南」标签页。"
+        description="测试兼容 OpenAI 的路由器（文本和视觉）。客户端设置在「指南」标签页。\n\n🆕 v0.2.9 (2026-06-14):\n• 密钥页「已配置的提供商」区域默认隐藏，减少干扰\n• 修复 KeysPage 中 JSX 空 div 编译错误\n• 优化 fallback 路径处理逻辑\n• 清理调试日志和冗余代码"
         actions={
           <>
             <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v ?? 'auto')}>

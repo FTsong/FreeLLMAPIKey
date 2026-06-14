@@ -77,6 +77,7 @@ function createTables(db: Database.Database) {
       context_window INTEGER,
       requires_vision INTEGER NOT NULL DEFAULT 0,
       enabled INTEGER NOT NULL DEFAULT 1,
+      base_url TEXT,
       UNIQUE(platform, model_id)
     );
 
@@ -90,7 +91,8 @@ function createTables(db: Database.Database) {
       status TEXT NOT NULL DEFAULT 'unknown',
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      last_checked_at TEXT
+      last_checked_at TEXT,
+      base_url TEXT
     );
 
     CREATE TABLE IF NOT EXISTS requests (

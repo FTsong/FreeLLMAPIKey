@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageHeader } from '@/components/page-header'
 import { UnifiedKeySection } from '@/components/unified-key-section'
-import type { ApiKey, Platform } from '../../../shared/types'
+import type { ApiKey, Platform, CustomModel } from '../../../shared/types'
 
 const PLATFORMS: { value: Platform; label: string }[] = [
   { value: 'google', label: 'Google AI Studio' },
@@ -81,6 +81,23 @@ function CustomProviderSection() {
   const [displayName, setDisplayName] = useState('')
   const [apiKey, setApiKey] = useState('')
 
+  // Discover state
+  const [discoverBaseUrl, setDiscoverBaseUrl] = useState('')
+  const [discoverApiKey, setDiscoverApiKey] = useState('')
+  const [discoverResult, setDiscoverResult] = useState<{ baseUrl: string; models: Array<{ id: string; object: string }> } | null>(null)
+  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set())
+  const [discovering, setDiscovering] = useState(false)
+  const [discoverError, setDiscoverError] = useState<string | null>(null)
+
+  // Fetch custom models
+  const { data: customModels = [] } = useQuery<CustomModel[]>({
+    queryKey: ['customModels'],
+    queryFn: () => apiFetch('/api/keys/custom/models'),
+  })
+
+  // Existing model IDs (for dedup in UI)
+  const existingModelIds = new Set(customModels.map(m => m.modelId))
+
   const addCustom = useMutation({
     mutationFn: (body: { baseUrl: string; model: string; displayName?: string; apiKey?: string }) =>
       apiFetch('/api/keys/custom', { method: 'POST', body: JSON.stringify(body) }),
@@ -89,8 +106,35 @@ function CustomProviderSection() {
       queryClient.invalidateQueries({ queryKey: ['health'] })
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
       queryClient.invalidateQueries({ queryKey: ['models'] })
+      queryClient.invalidateQueries({ queryKey: ['customModels'] })
       setModel('')
       setDisplayName('')
+    },
+  })
+
+  const deleteCustomModel = useMutation({
+    mutationFn: (modelId: string) => apiFetch(`/api/keys/custom/model/${modelId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['customModels'] })
+      queryClient.invalidateQueries({ queryKey: ['keys'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+    },
+  })
+
+  const bulkImport = useMutation({
+    mutationFn: (body: { baseUrl: string; models: string[]; apiKey?: string }) =>
+      apiFetch('/api/keys/custom/bulk', { method: 'POST', body: JSON.stringify(body) }),
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ['customModels'] })
+      queryClient.invalidateQueries({ queryKey: ['keys'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      queryClient.invalidateQueries({ queryKey: ['models'] })
+      setDiscoverResult(null)
+      setSelectedModels(new Set())
+      setDiscoverBaseUrl('')
+      setDiscoverApiKey('')
     },
   })
 
@@ -100,13 +144,61 @@ function CustomProviderSection() {
     addCustom.mutate({ baseUrl, model, displayName: displayName || undefined, apiKey: apiKey || undefined })
   }
 
+  const handleDiscover = async () => {
+    if (!discoverBaseUrl) return
+    setDiscovering(true)
+    setDiscoverError(null)
+    setDiscoverResult(null)
+    setSelectedModels(new Set())
+    try {
+      const res = await apiFetch('/api/keys/custom/discover', {
+        method: 'POST',
+        body: JSON.stringify({ baseUrl: discoverBaseUrl, apiKey: discoverApiKey || undefined }),
+      })
+      setDiscoverResult(res)
+      // Pre-select all new (non-existing) models
+      const newModels = (res.models as Array<{ id: string; object: string }>)
+        .filter(m => !existingModelIds.has(m.id))
+        .map(m => m.id)
+      setSelectedModels(new Set(newModels))
+    } catch (err: any) {
+      setDiscoverError(err.message || '发现模型失败')
+    } finally {
+      setDiscovering(false)
+    }
+  }
+
+  const toggleModelSelection = (modelId: string) => {
+    setSelectedModels(prev => {
+      const next = new Set(prev)
+      if (next.has(modelId)) {
+        next.delete(modelId)
+      } else {
+        next.add(modelId)
+      }
+      return next
+    })
+  }
+
+  const handleBulkImport = () => {
+    if (!discoverResult || selectedModels.size === 0) return
+    const models = Array.from(selectedModels)
+    bulkImport.mutate({
+      baseUrl: discoverResult.baseUrl,
+      models,
+      apiKey: discoverApiKey || undefined,
+    })
+  }
+
   return (
     <section>
       <h2 className="text-sm font-medium mb-1">添加自定义 OpenAI 兼容模型</h2>
       <p className="text-xs text-muted-foreground mb-3">
         指向任何兼容 OpenAI 的端点 — llama.cpp、LM Studio、vLLM、本地 Ollama 或远程网关。添加你想要路由的每个模型；它们共享同一个端点。API 密钥是可选的（大多数本地服务器不需要密钥）。
       </p>
-      <form onSubmit={submit} className="flex flex-wrap items-end gap-3 rounded-lg border p-4 bg-card">
+
+      {/* Single model form */}
+      <form onSubmit={submit} className="flex flex-wrap items-end gap-3 rounded-lg border p-4 bg-card mb-4">
         <div className="space-y-1.5 flex-1 min-w-[240px]">
           <Label className="text-xs">基础 URL</Label>
           <Input
@@ -151,6 +243,144 @@ function CustomProviderSection() {
       {addCustom.isError && (
         <p className="text-destructive text-xs mt-2">{(addCustom.error as Error).message}</p>
       )}
+
+      {/* Model discovery from /v1/models */}
+      <details className="rounded-lg border p-4 bg-card mb-4">
+        <summary className="text-xs font-medium cursor-pointer text-muted-foreground hover:text-foreground select-none">
+          从端点自动发现模型
+        </summary>
+        <div className="mt-3 space-y-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="space-y-1.5 flex-1 min-w-[240px]">
+              <Label className="text-xs">基础 URL</Label>
+              <Input
+                value={discoverBaseUrl}
+                onChange={e => setDiscoverBaseUrl(e.target.value)}
+                placeholder="https://token.sensenova.cn/v1"
+                className="font-mono text-xs"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">API 密钥（可选）</Label>
+              <Input
+                type="password"
+                value={discoverApiKey}
+                onChange={e => setDiscoverApiKey(e.target.value)}
+                placeholder="可选"
+                className="w-[180px] font-mono text-xs"
+              />
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleDiscover}
+              disabled={!discoverBaseUrl || discovering}
+            >
+              {discovering ? '正在查询…' : '发现模型'}
+            </Button>
+          </div>
+
+          {discoverError && (
+            <p className="text-destructive text-xs">{discoverError}</p>
+          )}
+
+          {discoverResult && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">
+                  发现 {discoverResult.models.length} 个模型（已选择 {selectedModels.size} 个）
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    onClick={() => {
+                      const allIds = discoverResult.models.map(m => m.id)
+                      setSelectedModels(prev => {
+                        if (prev.size === allIds.length) return new Set()
+                        return new Set(allIds)
+                      })
+                    }}
+                  >
+                    {selectedModels.size === discoverResult.models.length ? '取消全选' : '全选'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleBulkImport}
+                    disabled={selectedModels.size === 0 || bulkImport.isPending}
+                  >
+                    {bulkImport.isPending ? '导入中…' : `导入所选 (${selectedModels.size})`}
+                  </Button>
+                </div>
+              </div>
+              {bulkImport.isSuccess && (
+                <p className="text-emerald-600 text-xs">
+                  成功导入 {(bulkImport.data as any)?.count ?? selectedModels.size} 个模型
+                </p>
+              )}
+              <div className="max-h-60 overflow-y-auto rounded-lg border divide-y bg-card">
+                {discoverResult.models.map(m => {
+                  const alreadyExists = existingModelIds.has(m.id)
+                  const selected = selectedModels.has(m.id)
+                  return (
+                    <label
+                      key={m.id}
+                      className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors hover:bg-muted/40 ${
+                        alreadyExists ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        disabled={alreadyExists}
+                        onChange={() => toggleModelSelection(m.id)}
+                        className="size-3.5"
+                      />
+                      <code className="text-xs font-mono">{m.id}</code>
+                      {alreadyExists && (
+                        <span className="text-[11px] text-muted-foreground">（已存在）</span>
+                      )}
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </details>
+
+      {/* Custom models list */}
+      {customModels.length > 0 && (
+        <div className="mt-4">
+          <h3 className="text-xs font-medium mb-2 text-muted-foreground">已添加的模型 ({customModels.length})</h3>
+          <div className="rounded-lg border divide-y bg-card overflow-hidden">
+            {customModels.map(cm => (
+              <div key={cm.id} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors">
+                <span className={`size-1.5 rounded-full flex-shrink-0 ${statusDot[cm.keyStatus] ?? statusDot.unknown}`} />
+                <code className="text-xs font-mono flex-shrink-0">{cm.displayName}</code>
+                {cm.baseUrl && (
+                  <code className="text-xs font-mono text-muted-foreground">{cm.baseUrl}</code>
+                )}
+                {!cm.enabled && <span className="text-xs text-muted-foreground">(禁用)</span>}
+                <div className="flex-1" />
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="text-muted-foreground hover:text-destructive"
+                  onClick={() => {
+                    if (confirm(`确定要删除模型 "${cm.displayName}" 吗？`)) {
+                      deleteCustomModel.mutate(cm.modelId)
+                    }
+                  }}
+                  disabled={deleteCustomModel.isPending}
+                >
+                  {deleteCustomModel.isPending ? '删除中…' : '移除'}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -162,6 +392,7 @@ export default function KeysPage() {
   const [accountId, setAccountId] = useState('')
   const [bedrockAccessKeyId, setBedrockAccessKeyId] = useState('')
   const [label, setLabel] = useState('')
+  const [showConfigured, setShowConfigured] = useState(true)
 
   const { data: keys = [], isLoading } = useQuery<ApiKey[]>({
     queryKey: ['keys'],
@@ -358,57 +589,60 @@ export default function KeysPage() {
         <CustomProviderSection />
 
         <section>
-          <h2 className="text-sm font-medium mb-3">已配置的提供商</h2>
-          {isLoading ? (
-            <p className="text-sm text-muted-foreground">加载中…</p>
-          ) : keys.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-8 text-center">
-              <p className="text-sm text-muted-foreground">
-                还没有提供商密钥。在上面添加一个开始路由。
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-6">
-              {grouped.map(group => (
-                <div key={group.value}>
-                  <div className="flex items-baseline justify-between mb-2">
-                    <h3 className="text-sm font-medium">{group.label}</h3>
-                    <span className="text-xs text-muted-foreground tabular-nums">
-                      {group.keys.length} key{group.keys.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                  <div className="rounded-lg border divide-y bg-card overflow-hidden">
-                    {group.keys.map(k => {
-                      const h = healthKeyMap.get(k.id)
-                      const status = h?.status ?? k.status
-                      const lastChecked = h?.lastCheckedAt
-                      return (
-                        <div key={k.id} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors">
-                          <span className={`size-1.5 rounded-full flex-shrink-0 ${statusDot[status] ?? statusDot.unknown}`} />
-                          <code className="text-xs font-mono flex-shrink-0">{k.maskedKey}</code>
-                          {k.platform === 'custom' && k.baseUrl && (
-                            <code className="text-xs font-mono text-muted-foreground">{k.baseUrl}</code>
-                          )}
-                          {k.label && <span className="text-xs text-muted-foreground">{k.label}</span>}
-                          <span className="text-xs text-muted-foreground">{statusLabel[status] ?? status}</span>
-                          <div className="flex-1" />
-                          {lastChecked && (
-                            <span className="text-[11px] text-muted-foreground tabular-nums">
-                              {new Date(lastChecked).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </span>
-                          )}
-                          <Button variant="ghost" size="xs" onClick={() => checkKey.mutate(k.id)} disabled={checkKey.isPending}>
-                            检查
-                          </Button>
-                          <Button variant="ghost" size="xs" className="text-muted-foreground hover:text-destructive" onClick={() => deleteKey.mutate(k.id)} disabled={deleteKey.isPending}>
-                            移除
-                          </Button>
-                        </div>
-                      )
-                    })}
-                  </div>
+          {false && (
+            <div>
+              {isLoading ? (
+                <p className="text-sm text-muted-foreground">加载中…</p>
+              ) : keys.length === 0 ? (
+                <div className="rounded-lg border border-dashed p-8 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    还没有提供商密钥。在上面添加一个开始路由。
+                  </p>
                 </div>
-              ))}
+              ) : (
+                <div className="space-y-6">
+                  {grouped.map(group => (
+                    <div key={group.value}>
+                      <div className="flex items-baseline justify-between mb-2">
+                        <h3 className="text-sm font-medium">{group.label}</h3>
+                        <span className="text-xs text-muted-foreground tabular-nums">
+                          {group.keys.length} key{group.keys.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <div className="rounded-lg border divide-y bg-card overflow-hidden">
+                        {group.keys.map(k => {
+                          const h = healthKeyMap.get(k.id)
+                          const status = h?.status ?? k.status
+                          const lastChecked = h?.lastCheckedAt
+                          return (
+                            <div key={k.id} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors">
+                              <span className={`size-1.5 rounded-full flex-shrink-0 ${statusDot[status] ?? statusDot.unknown}`} />
+                              <code className="text-xs font-mono flex-shrink-0">{k.maskedKey}</code>
+                              {k.platform === 'custom' && k.baseUrl && (
+                                <code className="text-xs font-mono text-muted-foreground">{k.baseUrl}</code>
+                              )}
+                              {k.label && <span className="text-xs text-muted-foreground">{k.label}</span>}
+                              <span className="text-xs text-muted-foreground">{statusLabel[status] ?? status}</span>
+                              <div className="flex-1" />
+                              {lastChecked && (
+                                <span className="text-[11px] text-muted-foreground tabular-nums">
+                                  {new Date(lastChecked).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                              )}
+                              <Button variant="ghost" size="xs" onClick={() => checkKey.mutate(k.id)} disabled={checkKey.isPending}>
+                                检查
+                              </Button>
+                              <Button variant="ghost" size="xs" className="text-muted-foreground hover:text-destructive" onClick={() => deleteKey.mutate(k.id)} disabled={deleteKey.isPending}>
+                                移除
+                              </Button>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </section>

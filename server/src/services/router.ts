@@ -14,6 +14,7 @@ interface ModelRow {
   rpd_limit: number | null;
   tpm_limit: number | null;
   tpd_limit: number | null;
+  base_url: string | null;
 }
 
 interface KeyRow {
@@ -204,8 +205,8 @@ export function routeRequest(
 
     // Get all healthy, enabled keys for this platform (base_url needed for custom)
     const keys = db.prepare(
-      'SELECT id, platform, encrypted_key, iv, auth_tag, status, enabled, base_url FROM api_keys WHERE platform = ? AND enabled = 1 AND status != ?'
-    ).all(model.platform, 'invalid') as KeyRow[];
+      'SELECT id, platform, encrypted_key, iv, auth_tag, status, enabled, base_url FROM api_keys WHERE platform = ? AND enabled = 1 AND status != ? AND (platform != ? OR base_url = ?)'
+    ).all(model.platform, 'invalid', 'custom', model.base_url) as KeyRow[];
 
     if (keys.length === 0) continue;
 
@@ -234,10 +235,11 @@ export function routeRequest(
       if (!canMakeRequest(model.platform, model.model_id, key.id, limits)) continue;
       if (!canUseTokens(model.platform, model.model_id, key.id, estimatedTokens, limits)) continue;
 
-      // For 'custom' platform the real provider is built from this key's
-      // base_url — the registered placeholder has an empty baseUrl.
+      // For 'custom' platform the real provider is built from this model's
+      // base_url stored in the models table — each custom model can have
+      // its own endpoint.
       const resolvedProvider = model.platform === 'custom'
-        ? resolveProvider('custom', key.base_url)
+        ? resolveProvider('custom', model.base_url)
         : provider;
       if (!resolvedProvider) continue;
 

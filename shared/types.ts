@@ -60,6 +60,16 @@ export interface ApiKeyCreate {
   label?: string;
 }
 
+export interface CustomModel {
+  id: number;
+  modelId: string;
+  displayName: string;
+  enabled: boolean;
+  sizeLabel: string;
+  baseUrl: string | null;
+  keyStatus: KeyStatus;
+}
+
 // ---- Fallback Config ----
 
 export interface FallbackEntry {
