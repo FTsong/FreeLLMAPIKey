@@ -1,22 +1,49 @@
 {
-  "name": "freellmapi",
-  "private": true,
+  "name": "freellmapikey",
+  "version": "1.0.1",
+  "description": "One OpenAI-compatible endpoint. 18 free-tier providers. ~1.3B tokens/month.",
+  "private": false,
+  "bin": {
+    "freellmapikey": "bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "llm",
+    "openai",
+    "proxy",
+    "free",
+    "gemini",
+    "claude",
+    "codex",
+    "embeddings"
+  ],
+  "homepage": "https://github.com/nalepy/freellmapikey",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nalepy/freellmapikey.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "workspaces": [
     "shared",
     "server",
     "client"
   ],
   "scripts": {
-    "dev": "concurrently --kill-others-on-fail --names server,client \"npm run dev -w server\" \"npm run dev -w client\"",
-    "dev:lan": "concurrently --kill-others-on-fail --names server,client \"npm run dev -w server\" \"npm run dev -w client -- --host\"",
-    "test": "npm run test -w server && npm run test -w client --if-present",
+    "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
+    "test": "npm run test -w server",
     "build": "npm run build -w server && npm run build -w client",
     "build:server": "npm run build -w server",
-    "desktop:dev": "npm run build -w client && npm --prefix desktop run dev",
-    "desktop:dist": "npm run build -w client && npm --prefix desktop run dist",
-    "desktop:dist:win": "npm run build -w client && npm --prefix desktop run dist:win"
+    "codex:model-catalog": "node scripts/generate-codex-model-catalog.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
-  }
+  },
+  "packageManager": "pnpm@11.6.0+sha512.9a36518224080c6fe5165afdcfe79bfa118c29be703f3f462b1e32efe1e98e47e8750b148e08286250aad4113cc7993ca413c4e2cd447752708c2ee5751bc95f"
 }

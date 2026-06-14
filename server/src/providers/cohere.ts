@@ -2,9 +2,8 @@ import type {
   ChatMessage,
   ChatCompletionResponse,
   ChatCompletionChunk,
-} from '@freellmapi/shared/types.js';
-import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
-import { flattenMessageContent } from '../lib/content.js';
+} from '@freellmapikey/shared/types.js';
+import { BaseProvider, type CompletionOptions } from './base.js';
 
 const API_BASE = 'https://api.cohere.ai/compatibility/v1';
 
@@ -20,7 +19,7 @@ export class CohereProvider extends BaseProvider {
   ): Promise<ChatCompletionResponse> {
     const body: Record<string, unknown> = {
       model: modelId,
-      messages: flattenMessageContent(messages),
+      messages,
       temperature: options?.temperature,
       max_tokens: options?.max_tokens,
       top_p: options?.top_p,
@@ -39,7 +38,7 @@ export class CohereProvider extends BaseProvider {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw providerHttpError(res, `Cohere API error ${res.status}: ${(err as any).error?.message ?? res.statusText}`);
+      throw new Error(`Cohere API error ${res.status}: ${(err as any).error?.message ?? res.statusText}`);
     }
 
     const data = await res.json() as ChatCompletionResponse;
@@ -55,7 +54,7 @@ export class CohereProvider extends BaseProvider {
   ): AsyncGenerator<ChatCompletionChunk> {
     const body: Record<string, unknown> = {
       model: modelId,
-      messages: flattenMessageContent(messages),
+      messages,
       temperature: options?.temperature,
       max_tokens: options?.max_tokens,
       top_p: options?.top_p,
@@ -75,10 +74,35 @@ export class CohereProvider extends BaseProvider {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw providerHttpError(res, `Cohere API error ${res.status}: ${(err as any).error?.message ?? res.statusText}`);
+      throw new Error(`Cohere API error ${res.status}: ${(err as any).error?.message ?? res.statusText}`);
     }
 
-    yield* this.readSseStream(res);
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('No response body');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') return;
+        try {
+          yield JSON.parse(data) as ChatCompletionChunk;
+        } catch {
+          // Skip malformed chunks
+        }
+      }
+    }
   }
 
   async validateKey(apiKey: string): Promise<boolean> {

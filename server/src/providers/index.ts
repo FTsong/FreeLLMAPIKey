@@ -1,9 +1,10 @@
-import type { Platform } from '@freellmapi/shared/types.js';
+import type { Platform } from '@freellmapikey/shared/types.js';
 import type { BaseProvider } from './base.js';
 import { GoogleProvider } from './google.js';
 import { OpenAICompatProvider } from './openai-compat.js';
 import { CohereProvider } from './cohere.js';
 import { CloudflareProvider } from './cloudflare.js';
+import { BedrockProvider } from './bedrock.js';
 
 const providers = new Map<Platform, BaseProvider>();
 
@@ -28,19 +29,18 @@ register(new OpenAICompatProvider({
   baseUrl: 'https://api.cerebras.ai/v1',
 }));
 
-// SambaNova was dropped in V23 (June 2026): the free tier is permanently gone.
-// The always-free tier was retired in early 2025 for a one-time $5 trial
-// credit (expires in 3 months); once it lapses, every chat call 402s
-// "payment method required" with no recurring no-card path back.
+// SambaNova - OpenAI-compatible
+register(new OpenAICompatProvider({
+  platform: 'sambanova',
+  name: 'SambaNova',
+  baseUrl: 'https://api.sambanova.ai/v1',
+}));
 
-// NVIDIA NIM - OpenAI-compatible. Several NIM models reject parallel tool calls
-// ("This model only supports single tool-calls at once!"), so pin
-// parallel_tool_calls to false when tools are present. See issue #255.
+// NVIDIA NIM - OpenAI-compatible
 register(new OpenAICompatProvider({
   platform: 'nvidia',
   name: 'NVIDIA NIM',
   baseUrl: 'https://integrate.api.nvidia.com/v1',
-  forceSingleToolCall: true,
 }));
 
 // Mistral - OpenAI-compatible
@@ -48,6 +48,7 @@ register(new OpenAICompatProvider({
   platform: 'mistral',
   name: 'Mistral',
   baseUrl: 'https://api.mistral.ai/v1',
+  embeddingModels: ['mistral-embed'],
 }));
 
 // OpenRouter - OpenAI-compatible with extra headers
@@ -57,7 +58,7 @@ register(new OpenAICompatProvider({
   baseUrl: 'https://openrouter.ai/api/v1',
   extraHeaders: {
     'HTTP-Referer': 'http://localhost:3001',
-    'X-Title': 'FreeLLMAPI',
+    'X-Title': 'FreeLLMAPIKey',
   },
 }));
 
@@ -76,6 +77,9 @@ register(new CohereProvider());
 // Cloudflare Workers AI - OpenAI-compatible endpoint (key = "account_id:token")
 register(new CloudflareProvider());
 
+// AWS Bedrock — OpenAI-compatible Bedrock Mantle (key = "region:bedrock_api_key")
+register(new BedrockProvider());
+
 // Zhipu (Z.ai / bigmodel.cn) - OpenAI-compatible
 register(new OpenAICompatProvider({
   platform: 'zhipu',
@@ -83,19 +87,26 @@ register(new OpenAICompatProvider({
   baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
 }));
 
-// Hugging Face Inference Providers router — re-added in V13. The V4 removal
-// reason ("tool-call format issues") was the legacy serverless route that
-// emitted tool calls as text; the new router.huggingface.co meta-router
-// uses each backend's native protocol then normalizes the response.
-// Recurring $0.10/mo router credit on the free tier, no card required.
+// Hugging Face Inference Providers — OpenAI-compatible router.
+// Model ids use `{repo}:{provider}` (e.g. `openai/gpt-oss-20b:hf-inference`).
+// Token: https://huggingface.co/settings/tokens (Inference Providers permission).
 register(new OpenAICompatProvider({
   platform: 'huggingface',
-  name: 'HuggingFace Router',
+  name: 'Hugging Face',
   baseUrl: 'https://router.huggingface.co/v1',
+  extraHeaders: {
+    'X-Title': 'FreeLLMAPIKey',
+  },
 }));
 
-// Moonshot direct integration was dropped in V4 (paid-only); MiniMax direct
-// was dropped in V4 (superseded by the OpenRouter route).
+// Together AI — OpenAI-compatible serverless inference.
+// Prepaid credits (signup promos; $5 minimum purchase since July 2025).
+// Token: https://api.together.ai/settings/api-keys
+register(new OpenAICompatProvider({
+  platform: 'together',
+  name: 'Together AI',
+  baseUrl: 'https://api.together.ai/v1',
+}));
 
 // Ollama Cloud — OpenAI-compatible. Free plan: 1 concurrent model, 5h session
 // caps, GPU-time-based quota (not per-token). Many catalog models on the
@@ -114,37 +125,24 @@ register(new OpenAICompatProvider({
   timeoutMs: 120000,
 }));
 
-// Kilo AI Gateway — OpenAI-compatible aggregator. Kilo documents anonymous
-// (keyless) access for `:free` routes, rate-limited 200 req/hr per IP — so this
-// is registered `keyless: true`: the provider omits the Authorization header and
-// the Keys page stores a sentinel row so routing treats it as configured. Free
-// prompts/outputs are logged for training. validateUrl points at the gateway's
-// real model list (`/api/gateway/models`, no `/v1`) which answers GET keyless;
-// the `/v1/models` path only accepts POST (405). Probe before adding catalog
-// rows — most named "free" routes eventually transition to paid.
+// Kilo AI Gateway — OpenAI-compatible aggregator. Anonymous access works
+// (200 req/hr per IP) for the few :free routes still active; a Kilo API key
+// raises the limit. Most named "free" routes in the docs have transitioned to
+// paid ("free period ended") — probe before adding catalog rows.
 register(new OpenAICompatProvider({
   platform: 'kilo',
   name: 'Kilo Gateway',
   baseUrl: 'https://api.kilo.ai/api/gateway/v1',
-  validateUrl: 'https://api.kilo.ai/api/gateway/models',
-  keyless: true,
 }));
 
 // Pollinations — OpenAI-compatible, anonymous tier. The chat completions
 // endpoint lives at `/openai/v1/chat/completions` (NOT `/v1/...` — the
 // `/openai` prefix is mandatory). Public model list returns one anonymous
 // model (`openai-fast` = GPT-OSS 20B on OVH, tools=true).
-// Registered keyless (June 2026): the legacy text API is deprecated for
-// AUTHENTICATED users (replacement enter.pollinations.ai is pay-as-you-go
-// "pollen"), while anonymous access is explicitly unaffected — so the anon
-// path is the only recurring-free one left. Anon is queue-limited to 1
-// concurrent request per IP (429 "Queue full" on overlap; live-probed
-// 2026-06-10).
 register(new OpenAICompatProvider({
   platform: 'pollinations',
   name: 'Pollinations',
   baseUrl: 'https://text.pollinations.ai/openai/v1',
-  keyless: true,
 }));
 
 // LLM7.io — OpenAI-compatible aggregator. 100 req/hr free; anonymous access
@@ -157,50 +155,23 @@ register(new OpenAICompatProvider({
   baseUrl: 'https://api.llm7.io/v1',
 }));
 
-// OpenCode Zen — OpenAI-compatible gateway (https://opencode.ai/zen/v1), same
-// adapter as Groq/OpenRouter. A handful of promotional models are free for a
-// limited time; they need a free account key from https://opencode.ai/auth
-// (no card required — billing only applies to paid models). The free roster is
-// trial-only and prompts/outputs may be used to improve the models, so we seed
-// just the docs-confirmed free IDs (migrateModelsV18) with conservative limits.
-register(new OpenAICompatProvider({
-  platform: 'opencode',
-  name: 'OpenCode Zen',
-  baseUrl: 'https://opencode.ai/zen/v1',
-}));
-
-// OVHcloud AI Endpoints — OpenAI-compatible. Two free modes: anonymous
-// (documented 2 req/min per IP per model — observed even stricter across
-// models in practice) and authenticated (400 req/min), but an API key
-// requires a Public Cloud project with a payment method on file, so the
-// keyless row is the no-card path this catalog ships. Live-probed keyless
-// 2026-06-10: structured tool_calls on gpt-oss-120b and
-// Meta-Llama-3_3-70B-Instruct. OVH reserves the right to add token caps;
-// individual models get deprecated on notice. See migrateModelsV26.
-register(new OpenAICompatProvider({
-  platform: 'ovh',
-  name: 'OVH AI Endpoints',
-  baseUrl: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1',
-  keyless: true,
-}));
-
 // Chutes was evaluated for V11 and dropped: probe with a free-tier key
 // returned 402 on every model — "Quota exceeded and account balance is
 // $0.0, please pay with fiat or send tao". The "free" tier requires a
 // non-zero balance, which conflicts with the project's no-card criterion.
 
-// Placeholder so getProvider('custom')/hasProvider('custom')/getAllProviders()
-// behave — but the real instance is built per-key by resolveProvider(), since
-// a custom provider's base URL is user-supplied and lives on the api_keys row.
+// Custom OpenAI-compatible provider — placeholder so getProvider/hasProvider
+// behave. The real instance is built per-key by resolveProvider(), since the
+// base URL is user-supplied and lives on the api_keys row.
 register(new OpenAICompatProvider({
   platform: 'custom',
   name: 'Custom (OpenAI-compatible)',
   baseUrl: '',
 }));
 
-// Locally-hosted inference (llama.cpp / vLLM / Ollama on CPU) can be slow, so
-// custom providers get the same extended timeout as Ollama Cloud.
-const CUSTOM_PROVIDER_TIMEOUT_MS = 120000;
+// Locally-hosted inference (llama.cpp / vLLM / Ollama on CPU / LM Studio)
+// can be slow; custom providers get an extended timeout.
+const CUSTOM_PROVIDER_TIMEOUT_MS = 120_000;
 
 export function getProvider(platform: Platform): BaseProvider | undefined {
   return providers.get(platform);
@@ -208,9 +179,9 @@ export function getProvider(platform: Platform): BaseProvider | undefined {
 
 /**
  * Resolve the provider for a route. Built-in platforms return their registered
- * singleton; the 'custom' platform builds a fresh OpenAICompatProvider bound to
- * the caller-supplied base URL (stored per api_keys row). Returns undefined for
- * a custom provider with no base URL configured.
+ * singleton. The 'custom' platform builds a fresh OpenAICompatProvider bound
+ * to the caller-supplied base URL (stored on the api_keys row). Returns
+ * undefined for a custom provider with no base URL configured.
  */
 export function resolveProvider(platform: Platform, baseUrl?: string | null): BaseProvider | undefined {
   if (platform === 'custom') {

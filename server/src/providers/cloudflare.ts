@@ -2,9 +2,8 @@ import type {
   ChatMessage,
   ChatCompletionResponse,
   ChatCompletionChunk,
-} from '@freellmapi/shared/types.js';
-import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
-import { contentToString } from '../lib/content.js';
+} from '@freellmapikey/shared/types.js';
+import { BaseProvider, type CompletionOptions } from './base.js';
 
 /**
  * Cloudflare Workers AI provider.
@@ -21,12 +20,12 @@ export class CloudflareProvider extends BaseProvider {
     return { accountId: apiKey.slice(0, sep), token: apiKey.slice(sep + 1) };
   }
 
-  // Cloudflare's OpenAI-compat endpoint:
-  //   - rejects `content: null` on assistant messages that carry tool_calls,
-  //     even though the OpenAI spec allows it (collapse to '');
-  //   - doesn't accept the array content envelope, so flatten to string.
+  // Cloudflare's OpenAI-compat endpoint rejects `content: null` on assistant
+  // messages that carry tool_calls, even though the OpenAI spec allows it.
   private normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
-    return messages.map(m => ({ ...m, content: contentToString(m.content) }));
+    return messages.map(m =>
+      m.content === null ? { ...m, content: '' } : m,
+    );
   }
 
   async chatCompletion(
@@ -58,7 +57,7 @@ export class CloudflareProvider extends BaseProvider {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw providerHttpError(res, `Cloudflare API error ${res.status}: ${(err as any).error?.message ?? (err as any).errors?.[0]?.message ?? res.statusText}`);
+      throw new Error(`Cloudflare API error ${res.status}: ${(err as any).error?.message ?? (err as any).errors?.[0]?.message ?? res.statusText}`);
     }
 
     const data = await res.json() as ChatCompletionResponse;
@@ -96,45 +95,47 @@ export class CloudflareProvider extends BaseProvider {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw providerHttpError(res, `Cloudflare API error ${res.status}: ${(err as any).error?.message ?? (err as any).errors?.[0]?.message ?? res.statusText}`);
+      throw new Error(`Cloudflare API error ${res.status}: ${(err as any).error?.message ?? (err as any).errors?.[0]?.message ?? res.statusText}`);
     }
 
-    yield* this.readSseStream(res);
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('No response body');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') return;
+        try {
+          yield JSON.parse(data) as ChatCompletionChunk;
+        } catch {
+          // Skip malformed chunks
+        }
+      }
+    }
   }
 
   async validateKey(apiKey: string): Promise<boolean> {
     // Transport errors propagate — health.ts marks status='error' without
     // counting toward auto-disable. Only confirmed bad/inactive tokens disable.
-    const { accountId, token } = this.parseKey(apiKey);
-
-    // Account-scoped Workers AI tokens 403 on /user/tokens/verify; they can only
-    // self-verify via /accounts/{id}/tokens/verify. User-scoped tokens are the
-    // opposite. Try the self-verify endpoint first, then fall back to the
-    // account-scoped one before treating an auth failure as a bad key. (#297)
-    const userResult = await this.verifyAt(
-      'https://api.cloudflare.com/client/v4/user/tokens/verify',
-      token,
-    );
-    if (userResult !== 'auth-failed') return userResult;
-
-    const accountResult = await this.verifyAt(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/tokens/verify`,
-      token,
-    );
-    if (accountResult === 'auth-failed') return false;
-    return accountResult;
-  }
-
-  // Hits a Cloudflare token-verify endpoint. Returns true/false for a definitive
-  // active/inactive verdict, or 'auth-failed' when the token lacks access to
-  // THIS endpoint (401/403) so the caller can try the other scope.
-  private async verifyAt(url: string, token: string): Promise<boolean | 'auth-failed'> {
+    const { token } = this.parseKey(apiKey);
     const res = await this.fetchWithTimeout(
-      url,
+      'https://api.cloudflare.com/client/v4/user/tokens/verify',
       { method: 'GET', headers: { 'Authorization': `Bearer ${token}` } },
       10000,
     );
-    if (res.status === 401 || res.status === 403) return 'auth-failed';
+    if (res.status === 401 || res.status === 403) return false;
     if (!res.ok) return true; // unexpected non-2xx that isn't auth — don't disable
     const data = await res.json() as any;
     return data.success === true && data.result?.status === 'active';
