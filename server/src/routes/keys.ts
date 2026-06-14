@@ -8,14 +8,17 @@ import { encrypt, decrypt, maskKey } from '../lib/crypto.js';
 export const keysRouter = Router();
 
 // Active providers — must match providers/index.ts registrations + shared/types.ts Platform.
+// Moonshot and MiniMax direct integrations were dropped in V4. HuggingFace
+// was dropped in V4 and re-added in V13 via the router.huggingface.co route.
+// SambaNova was dropped in V23 (free tier permanently retired).
 const PLATFORMS = [
-  'google', 'groq', 'cerebras', 'sambanova', 'nvidia', 'mistral',
-  'openrouter', 'github', 'cohere', 'cloudflare', 'huggingface', 'together', 'zhipu', 'ollama',
-  'kilo', 'pollinations', 'llm7', 'bedrock', 'custom',
+  'google', 'groq', 'cerebras', 'nvidia', 'mistral',
+  'openrouter', 'github', 'cohere', 'cloudflare', 'zhipu', 'ollama',
+  'kilo', 'pollinations', 'llm7', 'huggingface', 'opencode', 'ovh', 'custom',
 ] as const;
 
-// `key` is optional so keyless providers can be added without one;
-// the handler enforces a non-empty key for everyone else.
+// `key` is optional so keyless providers (Kilo's anonymous gateway) can be added
+// without one; the handler enforces a non-empty key for everyone else.
 const addKeySchema = z.object({
   platform: z.enum(PLATFORMS),
   key: z.string().optional(),
@@ -75,13 +78,14 @@ keysRouter.post('/', (req: Request, res: Response) => {
     return;
   }
 
-  // Keyless providers store a sentinel so routing sees the platform as
-  // configured; the provider omits the auth header on outgoing calls.
+  // Keyless providers (Kilo anon) store a sentinel so routing sees the platform
+  // as configured; the provider omits the auth header on outgoing calls.
   const keyToStore = isKeyless ? (rawKey || 'no-key') : rawKey;
 
   const db = getDb();
 
-  // A keyless provider needs only one sentinel row — re-enable an existing one.
+  // A keyless provider needs only one sentinel row — re-enable an existing one
+  // instead of piling up duplicates each time the user clicks "Add".
   if (isKeyless) {
     const existing = db.prepare('SELECT id FROM api_keys WHERE platform = ? LIMIT 1').get(platform) as { id: number } | undefined;
     if (existing) {
@@ -114,243 +118,31 @@ keysRouter.post('/', (req: Request, res: Response) => {
   });
 });
 
-// ── Custom OpenAI-compatible endpoint ────────────────────────────────────────
-// Registers a local or self-hosted inference server (llama.cpp, LM Studio,
-// vLLM, local Ollama, etc.) by base URL. One shared 'custom' api_keys row
-// holds the endpoint; each model registered through it enters the fallback chain.
+// ── Custom OpenAI-compatible providers (#117, #212) ───────────────────────
+// User-configured endpoints (llama.cpp / LM Studio / vLLM / Ollama / any
+// OpenAI-compatible base_url). Each DISTINCT base_url gets its own 'custom'
+// api_keys row, and every registered model binds to its endpoint's key via
+// models.key_id — so several custom providers coexist without overwriting
+// each other (#212). Re-submitting an existing base_url updates its key/label;
+// re-registering an existing model id re-binds it to the submitted endpoint.
+// A model can be given as a bare id ("qwen3:4b") or as {model, displayName}.
+// `model`/`displayName` (singular) stay supported for older clients; `models`
+// (plural) lets one submit bind several model ids to the same endpoint. (#281)
+const modelEntrySchema = z.union([
+  z.string().min(1),
+  z.object({ model: z.string().min(1), displayName: z.string().optional() }),
+]);
 const customProviderSchema = z.object({
   baseUrl: z.string().url('baseUrl must be a valid URL'),
-  model: z.string().min(1, 'model is required'),
+  model: z.string().optional(),
+  models: z.array(modelEntrySchema).optional(),
   displayName: z.string().optional(),
   apiKey: z.string().optional(),
   label: z.string().optional(),
-});
-
-// List custom models
-keysRouter.get('/custom/models', (_req: Request, res: Response) => {
-  const db = getDb();
-  const modelRows = db.prepare(`
-    SELECT id, model_id, display_name, enabled, intelligence_rank, speed_rank, size_label, base_url
-    FROM models
-    WHERE platform = 'custom'
-    ORDER BY id ASC
-  `).all() as any[];
-
-  const models = modelRows.map(row => ({
-    id: row.id,
-    modelId: row.model_id,
-    displayName: row.display_name,
-    enabled: row.enabled === 1,
-    sizeLabel: row.size_label,
-    baseUrl: row.base_url ?? null,
-    keyStatus: 'unknown',
-  }));
-  res.json(models);
-});
-
-// ── Discover models from custom endpoint ───────────────────────────────────
-// Probes {baseUrl}/models to list available models for bulk import.
-const discoverSchema = z.object({
-  baseUrl: z.string().url('baseUrl must be a valid URL'),
-  apiKey: z.string().optional(),
-});
-
-keysRouter.post('/custom/discover', async (req: Request, res: Response) => {
-  const parsed = discoverSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
-    return;
-  }
-
-  const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
-  const apiKey = parsed.data.apiKey?.trim() || '';
-
-  try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-
-    const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), 10000);
-
-    const resp = await fetch(`${baseUrl}/models`, { headers, signal: abort.signal });
-    clearTimeout(timer);
-
-    if (!resp.ok) {
-      const errBody = await resp.json().catch(() => ({}));
-      res.status(502).json({
-        error: { message: `Endpoint returned ${resp.status}: ${(errBody as any).error?.message ?? resp.statusText}` },
-      });
-      return;
-    }
-
-    const body = await resp.json() as { data?: Array<{ id: string; object?: string }> };
-    if (!body.data || !Array.isArray(body.data)) {
-      res.status(502).json({ error: { message: 'Unexpected response format from /v1/models' } });
-      return;
-    }
-
-    // Filter to likely chat-capable models (non-embedding).
-    // OpenAI-compatible /v1/models returns objects like:
-    //   { id: "gpt-4", object: "model" }
-    // Some endpoints return flat string arrays under data.
-    const models = body.data
-      .filter((m: any) => {
-        if (typeof m === 'string') return true;
-        // Skip embedding-only models
-        const id = (m.id ?? '').toLowerCase();
-        if (id.includes('embedding') || id.includes('ada')) return false;
-        return true;
-      })
-      .map((m: any) => ({
-        id: typeof m === 'string' ? m : m.id,
-        object: typeof m === 'string' ? 'model' : (m.object ?? 'model'),
-      }));
-
-    res.json({ baseUrl, models });
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
-      res.status(504).json({ error: { message: 'Endpoint timed out after 10 seconds' } });
-    } else {
-      res.status(502).json({ error: { message: `Failed to reach endpoint: ${err.message}` } });
-    }
-  }
-});
-
-// ── Bulk import custom models ───────────────────────────────────────────────
-// Accepts a base URL and array of model IDs, registers all at once.
-const bulkImportSchema = z.object({
-  baseUrl: z.string().url('baseUrl must be a valid URL'),
-  models: z.array(z.string().min(1)).min(1, 'At least one model is required'),
-  apiKey: z.string().optional(),
-  label: z.string().optional(),
-});
-
-keysRouter.post('/custom/bulk', (req: Request, res: Response) => {
-  const parsed = bulkImportSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
-    return;
-  }
-
-  const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
-  const modelIds = parsed.data.models;
-  const rawKey = parsed.data.apiKey?.trim() || 'no-key';
-  const label = parsed.data.label ?? 'Custom';
-
-  const db = getDb();
-  const doImport = db.transaction(() => {
-    // Find or create an api_keys row for this base_url
-    const existingKey = db.prepare(
-      "SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ? LIMIT 1"
-    ).get(baseUrl) as { id: number } | undefined;
-
-    let keyId: number;
-    const { encrypted, iv, authTag } = encrypt(rawKey);
-    if (existingKey) {
-      db.prepare("UPDATE api_keys SET encrypted_key = ?, iv = ?, auth_tag = ?, status = 'unknown', enabled = 1 WHERE id = ?")
-        .run(encrypted, iv, authTag, existingKey.id);
-      keyId = existingKey.id;
-    } else {
-      const r = db.prepare(`
-        INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-        VALUES ('custom', ?, ?, ?, ?, 'unknown', 1, ?)
-      `).run(label, encrypted, iv, authTag, baseUrl);
-      keyId = Number(r.lastInsertRowid);
-    }
-
-    // Get the max priority currently in fallback chain
-    const maxPriority = (db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number }).m;
-
-    const imported: Array<{ modelId: string; displayName: string }> = [];
-
-    for (let i = 0; i < modelIds.length; i++) {
-      const modelId = modelIds[i].trim();
-      // Skip if model already exists for this base_url
-      const existing = db.prepare(
-        "SELECT id FROM models WHERE platform = 'custom' AND model_id = ? AND base_url = ?"
-      ).get(modelId, baseUrl) as { id: number } | undefined;
-      if (existing) {
-        imported.push({ modelId, displayName: modelId });
-        continue;
-      }
-
-      const displayName = modelId;
-
-      db.prepare(`
-        INSERT INTO models
-          (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
-           rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, base_url)
-        VALUES ('custom', ?, ?, 50, 50, 'Custom', NULL, NULL, NULL, NULL, '', NULL, 1, ?)
-      `).run(modelId, displayName, baseUrl);
-
-      const modelRow = db.prepare(
-        "SELECT id FROM models WHERE platform = 'custom' AND model_id = ?"
-      ).get(modelId) as { id: number };
-
-      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)')
-        .run(modelRow.id, maxPriority + 1 + i);
-
-      imported.push({ modelId, displayName });
-    }
-
-    return { keyId, imported };
-  });
-
-  const result = doImport();
-
-  res.status(201).json({
-    success: true,
-    keyId: result.keyId,
-    baseUrl,
-    imported: result.imported,
-    count: result.imported.length,
-  });
-});
-
-// Delete a single custom model
-keysRouter.delete('/custom/model/:modelId', (req: Request, res: Response) => {
-  const modelId = String(req.params.modelId).trim();
-  if (!modelId) {
-    res.status(400).json({ error: { message: 'modelId is required' } });
-    return;
-  }
-
-  const db = getDb();
-
-  // Get the model's db id and priority
-  const modelRow = db.prepare("SELECT id, enabled FROM models WHERE platform = 'custom' AND model_id = ?").get(modelId) as { id: number; enabled: number } | undefined;
-  if (!modelRow) {
-    res.status(404).json({ error: { message: 'Model not found' } });
-    return;
-  }
-
-  // Delete from fallback_config first
-  db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(modelRow.id);
-
-  // Delete the model
-  const result = db.prepare("DELETE FROM models WHERE platform = 'custom' AND model_id = ?").run(modelId);
-
-  if (result.changes === 0) {
-    res.status(404).json({ error: { message: 'Model not found' } });
-    return;
-  }
-
-  // If this was the last custom model, also clean up the custom api_keys row
-  const remaining = db.prepare("SELECT 1 FROM models WHERE platform = 'custom' LIMIT 1").get();
-  if (!remaining) {
-    // No more custom models, remove the custom api_keys entry too
-    db.prepare("DELETE FROM api_keys WHERE platform = 'custom'").run();
-  } else {
-    // Re-assign priorities to keep fallback chain contiguous
-    const models = db.prepare("SELECT id FROM models WHERE platform = 'custom' ORDER BY id ASC").all() as { id: number }[];
-    models.forEach((m, idx) => {
-      db.prepare('INSERT OR REPLACE INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)')
-        .run(m.id, idx);
-    });
-  }
-
-  res.json({ success: true, deletedModelId: modelId });
-});
+}).refine(
+  d => (d.model && d.model.trim().length > 0) || (d.models && d.models.length > 0),
+  { message: 'model or models is required' },
+);
 
 keysRouter.post('/custom', (req: Request, res: Response) => {
   const parsed = customProviderSchema.safeParse(req.body);
@@ -360,26 +152,47 @@ keysRouter.post('/custom', (req: Request, res: Response) => {
   }
 
   const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
-  const modelId = parsed.data.model.trim();
-  const displayName = (parsed.data.displayName ?? modelId).trim();
+  // Local servers often need no key; keep a sentinel so there's always a bearer.
   const rawKey = parsed.data.apiKey?.trim() || 'no-key';
   const label = parsed.data.label ?? 'Custom';
 
+  // Flatten singular + plural inputs into one list, dedupe by model id, drop
+  // blanks. The singular `displayName` only applies to a lone `model` (it can't
+  // sensibly fan out across many ids).
+  const entries: { modelId: string; displayName: string }[] = [];
+  const seen = new Set<string>();
+  const addEntry = (rawId: string, rawDisplay?: string) => {
+    const modelId = rawId.trim();
+    if (!modelId || seen.has(modelId)) return;
+    seen.add(modelId);
+    entries.push({ modelId, displayName: (rawDisplay?.trim() || modelId) });
+  };
+  if (parsed.data.model?.trim()) addEntry(parsed.data.model, parsed.data.displayName);
+  for (const m of parsed.data.models ?? []) {
+    if (typeof m === 'string') addEntry(m);
+    else addEntry(m.model, m.displayName);
+  }
+
+  if (entries.length === 0) {
+    res.status(400).json({ error: { message: 'model or models is required' } });
+    return;
+  }
+
   const db = getDb();
   const upsert = db.transaction(() => {
-    // Find or create an api_keys row for this base_url — models sharing
-    // the same endpoint should share one key.
-    const existingKey = db.prepare(
-      "SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ? LIMIT 1"
-    ).get(baseUrl) as { id: number } | undefined;
-
+    // One 'custom' key row PER ENDPOINT (matched on base_url). Re-submitting
+    // the same endpoint updates its key/label; a new base_url gets its own
+    // row instead of clobbering the previous provider. (#212)
+    const existing = db.prepare("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ? LIMIT 1")
+      .get(baseUrl) as { id: number } | undefined;
     let keyId: number;
-    const { encrypted, iv, authTag } = encrypt(rawKey);
-    if (existingKey) {
-      db.prepare("UPDATE api_keys SET encrypted_key = ?, iv = ?, auth_tag = ?, status = 'unknown', enabled = 1 WHERE id = ?")
-        .run(encrypted, iv, authTag, existingKey.id);
-      keyId = existingKey.id;
+    if (existing) {
+      const { encrypted, iv, authTag } = encrypt(rawKey);
+      db.prepare("UPDATE api_keys SET label = ?, encrypted_key = ?, iv = ?, auth_tag = ?, status = 'unknown', enabled = 1 WHERE id = ?")
+        .run(label, encrypted, iv, authTag, existing.id);
+      keyId = existing.id;
     } else {
+      const { encrypted, iv, authTag } = encrypt(rawKey);
       const r = db.prepare(`
         INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
         VALUES ('custom', ?, ?, ?, ?, 'unknown', 1, ?)
@@ -387,39 +200,88 @@ keysRouter.post('/custom', (req: Request, res: Response) => {
       keyId = Number(r.lastInsertRowid);
     }
 
-    // Register the model — insert if new, or update base_url if it already exists.
-    // This ensures models created before base_url was added get their endpoint set.
-    db.prepare(`
-      INSERT INTO models
-        (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
-         rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, base_url)
-      VALUES ('custom', ?, ?, 50, 50, 'Custom', NULL, NULL, NULL, NULL, '', NULL, 1, ?)
-      ON CONFLICT(platform, model_id) DO UPDATE SET base_url = ?
-    `).run(modelId, displayName, baseUrl, baseUrl);
+    const registered: { modelDbId: number; model: string; displayName: string }[] = [];
+    for (const { modelId, displayName } of entries) {
+      // Register each model bound to THIS endpoint's key. Custom models carry no
+      // rate limits and sort last in the intelligence preset (size_label tier).
+      // Re-registering an existing model id re-binds it (model ids are unique
+      // per platform, so one id can't live on two endpoints at once).
+      db.prepare(`
+        INSERT INTO models
+          (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+           rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, key_id)
+        VALUES ('custom', ?, ?, 50, 50, 'Custom', NULL, NULL, NULL, NULL, '', NULL, 1, ?)
+        ON CONFLICT(platform, model_id)
+        DO UPDATE SET display_name = excluded.display_name, key_id = excluded.key_id, enabled = 1
+      `).run(modelId, displayName, keyId);
 
-    const modelRow = db.prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = ?").get(modelId) as { id: number };
+      const modelRow = db.prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = ?").get(modelId) as { id: number };
 
-    // Append to fallback chain if not already present.
-    const inChain = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(modelRow.id);
-    if (!inChain) {
-      const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
-      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(modelRow.id, max.m + 1);
+      // Append to the fallback chain if not already present.
+      const inChain = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(modelRow.id);
+      if (!inChain) {
+        const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
+        db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(modelRow.id, max.m + 1);
+      }
+
+      registered.push({ modelDbId: modelRow.id, model: modelId, displayName });
     }
 
-    return { keyId, modelDbId: modelRow.id };
+    return { keyId, registered };
   });
 
-  const { keyId, modelDbId } = upsert();
+  const { keyId, registered } = upsert();
+  // `model`/`displayName`/`modelDbId` echo the first model for older clients;
+  // `models` carries the full set registered in this call.
+  const first = registered[0]!;
   res.status(201).json({
     success: true,
     keyId,
-    modelDbId,
+    modelDbId: first.modelDbId,
     platform: 'custom',
     baseUrl,
-    model: modelId,
-    displayName,
+    model: first.model,
+    displayName: first.displayName,
+    models: registered,
     maskedKey: maskKey(rawKey),
   });
+});
+
+// Delete a key
+keysRouter.delete('/:id', (req: Request, res: Response) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ error: { message: 'Invalid key ID' } });
+    return;
+  }
+
+  const db = getDb();
+  const row = db.prepare('SELECT platform FROM api_keys WHERE id = ?').get(id) as { platform: string } | undefined;
+  if (!row) {
+    res.status(404).json({ error: { message: 'Key not found' } });
+    return;
+  }
+
+  const remove = db.transaction(() => {
+    db.prepare('DELETE FROM api_keys WHERE id = ?').run(id);
+    // Custom models exist only because POST /custom registered them alongside
+    // their endpoint key (#117) — they can't route without it. Cascade away
+    // the models bound to THIS endpoint (#212); other custom providers keep
+    // theirs. Legacy rows (key_id NULL) are swept once no custom keys remain,
+    // so they never linger in the fallback chain forever (#189).
+    if (row.platform === 'custom') {
+      db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom' AND key_id = ?)").run(id);
+      db.prepare("DELETE FROM models WHERE platform = 'custom' AND key_id = ?").run(id);
+      const remaining = db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'").get() as { n: number };
+      if (remaining.n === 0) {
+        db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
+        db.prepare("DELETE FROM models WHERE platform = 'custom'").run();
+      }
+    }
+  });
+  remove();
+
+  res.json({ success: true });
 });
 
 // Toggle all keys for a platform
@@ -442,26 +304,7 @@ keysRouter.patch('/platform/:platform', (req: Request, res: Response) => {
   res.json({ success: true, enabled, updatedKeys: result.changes });
 });
 
-// Delete a key
-keysRouter.delete('/:id', (req: Request, res: Response) => {
-  const id = parseInt(req.params.id as string, 10);
-  if (isNaN(id)) {
-    res.status(400).json({ error: { message: 'Invalid key ID' } });
-    return;
-  }
-
-  const db = getDb();
-  const result = db.prepare('DELETE FROM api_keys WHERE id = ?').run(id);
-
-  if (result.changes === 0) {
-    res.status(404).json({ error: { message: 'Key not found' } });
-    return;
-  }
-
-  res.json({ success: true });
-});
-
-// Update key — toggle enable/disable and/or edit label
+// Update key (toggle enable/disable or edit label)
 keysRouter.patch('/:id', (req: Request, res: Response) => {
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) {
