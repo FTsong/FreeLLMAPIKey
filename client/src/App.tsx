@@ -81,7 +81,7 @@ function App() {
             <div className="max-w-6xl mx-auto px-6 flex items-center">
               <Brand />
               <nav className="flex items-center gap-6 ml-10">
-                <NavItem to="/playground"> playground</NavItem>
+                <NavItem to="/playground">游乐场</NavItem>
                 <NavItem to="/keys">密钥</NavItem>
                 <NavItem to="/guides">指南</NavItem>
                 <NavItem to="/fallback">降级链</NavItem>

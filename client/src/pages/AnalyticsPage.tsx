@@ -65,14 +65,14 @@ export default function AnalyticsPage() {
 
   function handleResetAnalytics() {
     const ok = window.confirm(
-      'Delete all request history? Analytics charts and the Fallback monthly token bar will reset to zero. The detailed error log is kept so you can still debug failures. API keys and fallback order are not changed.',
+      '删除所有请求历史？分析图表和降级链的月度 token 柱状图将重置为零。详细错误日志会保留以便调试。API 密钥和降级顺序不会改变。',
     )
     if (!ok) return
     resetMutation.mutate()
   }
 
   function handleClearErrorLog() {
-    const ok = window.confirm('Delete the detailed error log (database + error.log file)?')
+    const ok = window.confirm('删除详细错误日志（数据库 + error.log 文件）？')
     if (!ok) return
     clearErrorLogMutation.mutate()
   }

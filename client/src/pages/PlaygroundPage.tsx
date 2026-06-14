@@ -146,7 +146,7 @@ export default function PlaygroundPage() {
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
       <PageHeader
-        title=" playground"
+        title="游乐场"
         description="测试兼容 OpenAI 的路由器（文本和视觉）。客户端设置在「指南」标签页。"
         actions={
           <>
