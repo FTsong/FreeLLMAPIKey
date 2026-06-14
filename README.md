@@ -2,9 +2,11 @@
 
 # FreeLLMAPIKey
 
-**One OpenAI-compatible endpoint. 18 integrated providers. ~1B+ tokens per month.**
+**一个 OpenAI 兼容的 API 网关 · 18 家免费模型提供商 · 每月约 10 亿 token**
 
-> **Fork notice:** This repo is **FreeLLMAPIKey** (`freellmapikey`), a renamed fork of [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) by [Tashfeen Ahmed](https://github.com/tashfeenahmed). See [CREDITS.md](./CREDITS.md).
+> **Fork 说明：** 本仓库是 [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) 的重命名分叉，由 [Tashfeen Ahmed](https://github.com/tashfeenahmed) 创建。详见 [CREDITS.md](./CREDITS.md)。
+
+**中文优化版：** 本版本已对界面进行完整中文化，支持低内存设备（如树莓派、32MB RAM 设备），开箱即用。
 
 Aggregate the free tiers from Google, Groq, Cerebras, SambaNova, NVIDIA, Mistral, OpenRouter, GitHub Models, Cohere, Cloudflare, Hugging Face, Together AI, Z.ai (Zhipu), and AWS Bedrock behind a single `/v1/chat/completions` endpoint. Keys are stored encrypted. A router picks the best available model for each request, falls over to the next provider when one is rate-limited, and tracks per-key usage so you stay under every free-tier cap.
 
@@ -92,6 +94,8 @@ The problem is that stacking them by hand is painful: many different SDKs, rate 
 - **Admin dashboard** — React + Vite UI to manage keys, reorder the fallback chain, inspect analytics, and run prompts in a playground. Dark mode included.
 - **Analytics** — Per-request logging with latency, token counts, success rate, per-provider breakdowns, a **usage log** (timestamped successful routes), and a persistent **error log** for failures.
 - **Deploys to a Raspberry Pi** — Runs happily on a Pi 4 under PM2 behind nginx. ~40 MB RSS at idle.
+- **Low-memory friendly** — Optimized for devices with as little as 32 MB RAM. Works on ARM-based single-board computers, small VPS, and older hardware.
+- **中文界面** — 管理面板已完整中文化，导航、页面标题、提示框等均已翻译为中文，开箱即用。
 
 ## Not yet supported
 
