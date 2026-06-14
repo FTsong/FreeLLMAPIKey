@@ -1,15 +1,16 @@
 import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   LineChart, Line, Legend,
 } from 'recharts'
 import { apiFetch } from '@/lib/api'
-import { formatLocalDateTime, formatLocalTime, formatTimelineLabel } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/page-header'
+import { Tooltip as HoverTooltip } from '@/components/tooltip'
+import { formatSqliteUtcToLocalTime } from '@/lib/utils'
+import { useI18n } from '@/i18n'
 
 type TimeRange = '24h' | '7d' | '30d'
 
@@ -20,18 +21,21 @@ function formatTokens(n?: number): string {
   return String(n)
 }
 
-function Stat({ label, value, className }: { label: string; value: string | number; className?: string }) {
-  return (
-    <div className="rounded-lg border bg-card px-4 py-3">
+function Stat({ label, value, hint, className }: { label: string; value: string | number; hint?: string; className?: string }) {
+  const card = (
+    <div className="rounded-3xl border bg-card px-4 py-3">
       <p className="text-[11px] text-muted-foreground uppercase tracking-wider">{label}</p>
       <p className={`text-xl font-semibold tabular-nums mt-1 ${className ?? ''}`}>{value}</p>
     </div>
   )
+  // Same portal tooltip as the routing strategy chips. Opens BELOW the card:
+  // the stats row sits right under the sticky navbar.
+  return hint ? <HoverTooltip text={hint} side="bottom" className="block">{card}</HoverTooltip> : card
 }
 
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-lg border bg-card">
+    <div className="rounded-3xl border bg-card">
       <div className="px-4 py-3 border-b">
         <h3 className="text-sm font-medium">{title}</h3>
       </div>
@@ -45,37 +49,8 @@ const gridStyle = 'var(--border)'
 const primaryFill = 'var(--foreground)'
 
 export default function AnalyticsPage() {
-  const queryClient = useQueryClient()
+  const { t } = useI18n()
   const [range, setRange] = useState<TimeRange>('7d')
-
-  const resetMutation = useMutation({
-    mutationFn: () => apiFetch<{ deleted: number }>('/api/analytics/reset', { method: 'POST' }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['analytics'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback', 'token-usage'] })
-    },
-  })
-
-  const clearErrorLogMutation = useMutation({
-    mutationFn: () => apiFetch<{ deletedDb: number; clearedFile: boolean }>('/api/analytics/error-log/reset', { method: 'POST' }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['analytics', 'error-log'] })
-    },
-  })
-
-  function handleResetAnalytics() {
-    const ok = window.confirm(
-      '删除所有请求历史？分析图表和降级链的月度 token 柱状图将重置为零。详细错误日志会保留以便调试。API 密钥和降级顺序不会改变。',
-    )
-    if (!ok) return
-    resetMutation.mutate()
-  }
-
-  function handleClearErrorLog() {
-    const ok = window.confirm('删除详细错误日志（数据库 + error.log 文件）？')
-    if (!ok) return
-    clearErrorLogMutation.mutate()
-  }
 
   const { data: summary } = useQuery({
     queryKey: ['analytics', 'summary', range],
@@ -107,87 +82,83 @@ export default function AnalyticsPage() {
     queryFn: () => apiFetch<{ byCategory: any[]; byPlatform: any[]; detailed: any[] }>(`/api/analytics/error-distribution?range=${range}`),
   })
 
-  const { data: fallbackSettings } = useQuery({
-    queryKey: ['fallback'],
-    queryFn: () => apiFetch<{ visionOnlyRouting: boolean }>('/api/fallback'),
+  // Savings card shows ONE stable monthly figure regardless of the selected
+  // range: the last-30-days data projected to a full month from its actual
+  // span (a young install with 2 days of data shows 15x its 2-day total).
+  // Once 30 days of history exist the real total shows as-is. The hover
+  // hint carries the selected period's actual amount and the projection
+  // basis. Querying 30d separately is free: react-query shares the cache
+  // with the 30d tab.
+  const { data: summary30 } = useQuery({
+    queryKey: ['analytics', 'summary', '30d'],
+    queryFn: () => apiFetch<any>(`/api/analytics/summary?range=30d`),
   })
+  const actualSavings = summary?.estimatedCostSavings ?? 0
+  const baseSavings = summary30?.estimatedCostSavings ?? 0
+  const spanDays = (() => {
+    if (!summary30?.firstRequestAt) return 30
+    // SQLite stores UTC "YYYY-MM-DD HH:MM:SS"
+    const first = new Date(summary30.firstRequestAt.replace(' ', 'T') + 'Z').getTime()
+    const days = (Date.now() - first) / 86_400_000
+    if (!Number.isFinite(days)) return 30
+    return Math.min(Math.max(days, 1 / 24), 30)
+  })()
+  const extrapolated = spanDays < 29.5
+  const savings30d = extrapolated ? baseSavings * (30 / spanDays) : baseSavings
+  const rangeLabel = range === '24h' ? t('analytics.rangeLabel24h') : range === '7d' ? t('analytics.rangeLabel7d') : t('analytics.rangeLabel30d')
+  const spanLabel = spanDays >= 2 ? t('analytics.spanDays', { count: Math.round(spanDays) }) : t('analytics.spanHours', { count: Math.max(1, Math.round(spanDays * 24)) })
+  const savingsHint = extrapolated
+    ? t('analytics.savingsHint', { actual: actualSavings.toFixed(2), range: rangeLabel, span: spanLabel })
+    : t('analytics.savingsHintExact', { actual: actualSavings.toFixed(2), range: rangeLabel })
 
-  const { data: usageLog } = useQuery({
-    queryKey: ['analytics', 'usage-log', range],
-    queryFn: () => apiFetch<{ entries: any[] }>(`/api/analytics/usage-log?range=${range}&limit=100`),
-  })
-
-  const { data: errorLog } = useQuery({
-    queryKey: ['analytics', 'error-log', range],
-    queryFn: () => apiFetch<{ filePath: string; entries: any[] }>(`/api/analytics/error-log?range=${range}&limit=100`),
-  })
+  // Pinned = the client named a specific model instead of auto-routing.
+  // Honored = that model actually served it (the rest failed over).
+  const pinned = summary?.pinnedRequests ?? 0
+  const pinHonored = summary?.pinHonoredRequests ?? 0
+  const requestsHint = pinned > 0
+    ? t('analytics.requestsHintPinned', { pinned, honored: pinHonored, failed: pinned - pinHonored })
+    : t('analytics.requestsHintAuto')
 
   return (
     <div>
       <PageHeader
-        title="分析"
-        description="请求量、延迟、token 使用量和失败情况。视觉列显示哪些模型可以接受图片（与降级链相同）。"
+        title={t('analytics.title')}
+        description={t('analytics.description')}
         actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex gap-1 rounded-md border p-0.5">
-              {(['24h', '7d', '30d'] as TimeRange[]).map(r => (
-                <Button
-                  key={r}
-                  variant={range === r ? 'secondary' : 'ghost'}
-                  size="xs"
-                  onClick={() => setRange(r)}
-                >
-                  {r}
-                </Button>
-              ))}
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleClearErrorLog}
-              disabled={clearErrorLogMutation.isPending}
-            >
-              {clearErrorLogMutation.isPending ? '清除中…' : '清除错误日志'}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleResetAnalytics}
-              disabled={resetMutation.isPending}
-            >
-              {resetMutation.isPending ? '重置中…' : '重置分析'}
-            </Button>
+          <div className="flex gap-1 rounded-lg border p-0.5">
+            {(['24h', '7d', '30d'] as TimeRange[]).map(r => (
+              <Button
+                key={r}
+                variant={range === r ? 'secondary' : 'ghost'}
+                size="xs"
+                onClick={() => setRange(r)}
+              >
+                {t(r === '24h' ? 'analytics.range24h' : r === '7d' ? 'analytics.range7d' : 'analytics.range30d')}
+              </Button>
+            ))}
           </div>
         }
       />
 
       <div className="space-y-6">
-        {fallbackSettings?.visionOnlyRouting && (
-          <p className="text-sm text-muted-foreground rounded-lg border bg-card px-4 py-3">
-            <span className="font-medium text-foreground">仅视觉路由已开启。</span>{' '}
-            下方标记为视觉的模型才会被用于所有 API 流量（包括 Codex）。此表中的纯文本模型是启用该设置之前的历史记录。
-          </p>
-        )}
-
         {/* Summary stats */}
-        <p className="text-xs text-muted-foreground">
-          Token counts for the selected time range ({range}). Streaming requests use estimated input size unless the provider reports usage.
-          Failed fallback hops no longer add duplicate input. The Fallback budget bar uses calendar-month usage and may differ.
-        </p>
-
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          <Stat label="请求数" value={summary?.totalRequests ?? 0} />
-          <Stat label="成功率" value={`${summary?.successRate ?? 0}%`} />
-          <Stat label="输入 tokens" value={formatTokens(summary?.totalInputTokens)} />
-          <Stat label="输出 tokens" value={formatTokens(summary?.totalOutputTokens)} />
-          <Stat label="平均延迟" value={`${summary?.avgLatencyMs ?? 0} ms`} />
-          <Stat label="预估节省" value={`$${summary?.estimatedCostSavings ?? '0.00'}`} />
+          <Stat label={t('analytics.requests')} value={summary?.totalRequests ?? 0} hint={requestsHint} />
+          <Stat label={t('analytics.successRate')} value={`${summary?.successRate ?? 0}%`} />
+          <Stat label={t('analytics.inputTokens')} value={formatTokens(summary?.totalInputTokens)} />
+          <Stat label={t('analytics.outputTokens')} value={formatTokens(summary?.totalOutputTokens)} />
+          <Stat label={t('analytics.avgLatency')} value={`${summary?.avgLatencyMs ?? 0} ms`} />
+          {/* Priced per request at the served model's paid-API equivalent
+              rate (not a flat frontier-model rate) — see db/model-pricing.ts.
+              The value is a 30-day projection; the hover hint tells the whole
+              story (actual period amount + whether it was extrapolated). */}
+          <Stat label={t('analytics.estSavings')} value={`$${savings30d.toFixed(2)}`} hint={savingsHint} />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <Panel title="按提供商统计请求">
+          <Panel title={t('analytics.requestsByProvider')}>
             {byPlatform.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">暂无数据</p>
+              <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={byPlatform} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
@@ -201,9 +172,9 @@ export default function AnalyticsPage() {
             )}
           </Panel>
 
-          <Panel title="按提供商统计平均延迟">
+          <Panel title={t('analytics.avgLatencyByProvider')}>
             {byPlatform.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">No data yet</p>
+              <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={byPlatform} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
@@ -211,35 +182,26 @@ export default function AnalyticsPage() {
                   <XAxis dataKey="platform" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} />
                   <YAxis unit="ms" tick={axisStyle} tickLine={false} axisLine={false} />
                   <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
-                  <Bar dataKey="avgLatencyMs" name="Latency (ms)" fill="var(--muted-foreground)" radius={[3, 3, 0, 0]} />
+                  <Bar dataKey="avgLatencyMs" name={t('analytics.latencyMs')} fill="var(--muted-foreground)" radius={[3, 3, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             )}
           </Panel>
 
           <div className="lg:col-span-2">
-            <Panel title="随时间变化的请求">
+            <Panel title={t('analytics.requestsOverTime')}>
               {timeline.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-8">No data yet</p>
+                <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
               ) : (
                 <ResponsiveContainer width="100%" height={240}>
                   <LineChart data={timeline} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
-                    <XAxis
-                      dataKey="timestamp"
-                      tick={axisStyle}
-                      tickLine={false}
-                      axisLine={{ stroke: gridStyle }}
-                      tickFormatter={(v) => formatTimelineLabel(String(v), range === '24h')}
-                    />
+                    <XAxis dataKey="timestamp" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} />
                     <YAxis tick={axisStyle} tickLine={false} axisLine={false} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
-                      labelFormatter={(v) => formatTimelineLabel(String(v), range === '24h')}
-                    />
+                    <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} iconType="line" />
-                    <Line type="monotone" dataKey="successCount" name="成功" stroke={primaryFill} strokeWidth={1.5} dot={false} />
-                    <Line type="monotone" dataKey="failureCount" name="失败" stroke="var(--destructive)" strokeWidth={1.5} dot={false} />
+                    <Line type="monotone" dataKey="successCount" name={t('common.success')} stroke={primaryFill} strokeWidth={1.5} dot={false} />
+                    <Line type="monotone" dataKey="failureCount" name={t('common.failures')} stroke="var(--destructive)" strokeWidth={1.5} dot={false} />
                   </LineChart>
                 </ResponsiveContainer>
               )}
@@ -247,43 +209,37 @@ export default function AnalyticsPage() {
           </div>
 
           <div className="lg:col-span-2">
-            <Panel title="每模型明细">
+            <Panel title={t('analytics.perModelBreakdown')}>
               {byModel.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-8">No data yet</p>
+                <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
               ) : (
                 <div className="max-h-[360px] overflow-y-auto -mx-4">
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="pl-4">模型</TableHead>
-                        <TableHead>视觉</TableHead>
-                        <TableHead>提供商</TableHead>
-                        <TableHead className="text-right">请求数</TableHead>
-                        <TableHead className="text-right">成功</TableHead>
-                        <TableHead className="text-right">延迟</TableHead>
-                        <TableHead className="text-right">输入 tokens</TableHead>
-                        <TableHead className="text-right pr-4">输出 tokens</TableHead>
+                        <TableHead className="pl-4">{t('common.model')}</TableHead>
+                        <TableHead>{t('common.provider')}</TableHead>
+                        <TableHead className="text-right">{t('analytics.requests')}</TableHead>
+                        <TableHead className="text-right">{t('analytics.pinned')}</TableHead>
+                        <TableHead className="text-right">{t('common.success')}</TableHead>
+                        <TableHead className="text-right">{t('analytics.latency')}</TableHead>
+                        <TableHead className="text-right">{t('analytics.inTokens')}</TableHead>
+                        <TableHead className="text-right">{t('analytics.outTokens')}</TableHead>
+                        <TableHead className="text-right pr-4">{t('analytics.saved')}</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {byModel.map((m: any, i: number) => (
                         <TableRow key={i}>
                           <TableCell className="pl-4 text-sm font-medium">{m.displayName}</TableCell>
-                          <TableCell>
-                            {m.supportsVision ? (
-                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-normal">
-                                是
-                              </Badge>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
                           <TableCell className="text-xs text-muted-foreground">{m.platform}</TableCell>
                           <TableCell className="text-right tabular-nums">{m.requests}</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.pinnedRequests > 0 ? m.pinnedRequests : '—'}</TableCell>
                           <TableCell className="text-right tabular-nums">{m.successRate}%</TableCell>
                           <TableCell className="text-right tabular-nums">{m.avgLatencyMs} ms</TableCell>
                           <TableCell className="text-right tabular-nums">{formatTokens(m.totalInputTokens)}</TableCell>
-                          <TableCell className="text-right tabular-nums pr-4">{formatTokens(m.totalOutputTokens)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatTokens(m.totalOutputTokens)}</TableCell>
+                          <TableCell className="text-right tabular-nums pr-4">${(m.estimatedCost ?? 0).toFixed(2)}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -293,34 +249,9 @@ export default function AnalyticsPage() {
             </Panel>
           </div>
 
-          <Panel title="错误分布">
-            {!errorDist?.byCategory?.length ? (
-              <p className="text-sm text-muted-foreground text-center py-8">No errors</p>
-            ) : (
-              <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={errorDist.byCategory} margin={{ top: 6, right: 6, left: -12, bottom: 48 }}>
-                  <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
-                  <XAxis
-                    dataKey="category"
-                    tick={axisStyle}
-                    tickLine={false}
-                    axisLine={{ stroke: gridStyle }}
-                    interval={0}
-                    angle={-28}
-                    textAnchor="end"
-                    height={56}
-                  />
-                  <YAxis tick={axisStyle} tickLine={false} axisLine={false} allowDecimals={false} />
-                  <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
-                  <Bar dataKey="count" fill="var(--destructive)" radius={[3, 3, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </Panel>
-
-          <Panel title="按提供商统计错误">
+          <Panel title={t('analytics.errorsByProvider')}>
             {!errorDist?.byPlatform?.length ? (
-              <p className="text-sm text-muted-foreground text-center py-8">No errors</p>
+              <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noErrors')}</p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={errorDist.byPlatform} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
@@ -334,17 +265,17 @@ export default function AnalyticsPage() {
             )}
           </Panel>
 
-          <Panel title="最近错误">
+          <Panel title={t('analytics.recentErrors')}>
             {errors.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">No errors</p>
+              <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noErrors')}</p>
             ) : (
               <div className="max-h-[240px] overflow-y-auto -mx-4">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="pl-4">提供商</TableHead>
-                      <TableHead>消息</TableHead>
-                      <TableHead className="text-right pr-4">时间</TableHead>
+                      <TableHead className="pl-4">{t('common.provider')}</TableHead>
+                      <TableHead>{t('analytics.message')}</TableHead>
+                      <TableHead className="text-right pr-4">{t('analytics.time')}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -353,7 +284,7 @@ export default function AnalyticsPage() {
                         <TableCell className="pl-4 text-xs">{e.platform}</TableCell>
                         <TableCell className="text-xs max-w-[200px] truncate">{e.error}</TableCell>
                         <TableCell className="text-right text-xs text-muted-foreground tabular-nums pr-4">
-                          {formatLocalTime(e.createdAt)}
+                          {formatSqliteUtcToLocalTime(e.createdAt, { hour: '2-digit', minute: '2-digit' })}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -363,109 +294,6 @@ export default function AnalyticsPage() {
             )}
           </Panel>
         </div>
-
-        <Panel title="使用日志">
-          <p className="text-xs text-muted-foreground mb-3">
-            选定时间范围 ({range}) 内每次成功的路由请求，按最新优先。用于确认 Continue、Cline、Playground 或其他兼容 OpenAI 的客户端何时访问代理，以及由哪个提供商/模型处理了请求。重置分析时会被清除。
-          </p>
-          {!usageLog?.entries?.length ? (
-            <p className="text-sm text-muted-foreground text-center py-8">暂无成功请求</p>
-          ) : (
-            <div className="max-h-[420px] overflow-y-auto -mx-4">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="pl-4">时间</TableHead>
-                    <TableHead>模型</TableHead>
-                    <TableHead>提供商</TableHead>
-                    <TableHead>视觉</TableHead>
-                    <TableHead className="text-right">输入</TableHead>
-                    <TableHead className="text-right">输出</TableHead>
-                    <TableHead className="text-right pr-4">延迟</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {usageLog.entries.map((e: any) => (
-                    <TableRow key={e.id}>
-                      <TableCell className="pl-4 text-xs text-muted-foreground whitespace-nowrap">
-                        {formatLocalDateTime(e.createdAt)}
-                      </TableCell>
-                      <TableCell className="text-xs font-medium">{e.displayName}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{e.platform}</TableCell>
-                      <TableCell className="text-xs">
-                        {e.supportsVision ? (
-                          <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-normal">
-                            是
-                          </Badge>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right text-xs tabular-nums">{formatTokens(e.inputTokens)}</TableCell>
-                      <TableCell className="text-right text-xs tabular-nums">{formatTokens(e.outputTokens)}</TableCell>
-                      <TableCell className="text-right text-xs tabular-nums pr-4">{e.latencyMs} ms</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-        </Panel>
-
-        <Panel title="错误日志 (调试)">
-          <p className="text-xs text-muted-foreground mb-3">
-            故障排除的详细失败信息（端点、视觉标志、重试、完整消息）。
-            同时保存到{' '}
-            <code className="text-[11px] bg-muted px-1 py-0.5 rounded">{errorLog?.filePath ?? 'server/data/error.log'}</code>
-            。重置分析时不会清除。
-          </p>
-          {!errorLog?.entries?.length ? (
-            <p className="text-sm text-muted-foreground text-center py-8">无错误日志条目</p>
-          ) : (
-            <div className="max-h-[420px] overflow-y-auto -mx-4">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="pl-4">时间</TableHead>
-                    <TableHead>端点</TableHead>
-                    <TableHead>模型</TableHead>
-                    <TableHead>类别</TableHead>
-                    <TableHead>标志</TableHead>
-                    <TableHead className="pr-4">消息</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {errorLog.entries.map((e: any) => (
-                    <TableRow key={e.id}>
-                      <TableCell className="pl-4 text-xs text-muted-foreground whitespace-nowrap">
-                        {formatLocalDateTime(e.createdAt)}
-                      </TableCell>
-                      <TableCell className="text-xs">{e.endpoint}</TableCell>
-                      <TableCell className="text-xs">
-                        {e.displayName ?? e.platform ?? '—'}
-                        {e.attempt != null && (
-                          <span className="text-muted-foreground"> · try {e.attempt + 1}</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-xs">{e.errorCategory}</TableCell>
-                      <TableCell className="text-xs">
-                        <div className="flex flex-wrap gap-1">
-                          {e.hasImages && <Badge variant="outline" className="text-[10px]">img</Badge>}
-                          {e.requiresVision && <Badge variant="outline" className="text-[10px]">vision</Badge>}
-                          {e.willRetry && <Badge variant="outline" className="text-[10px]">retry</Badge>}
-                          {e.stream && <Badge variant="outline" className="text-[10px]">stream</Badge>}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-xs pr-4 max-w-md whitespace-pre-wrap break-words">
-                        {e.errorMessage}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-        </Panel>
       </div>
     </div>
   )

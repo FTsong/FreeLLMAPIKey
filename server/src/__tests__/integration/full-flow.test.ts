@@ -1,16 +1,19 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
-async function req(app: Express, method: string, path: string, body?: any) {
+let dashToken = '';
+
+async function req(app: Express, method: string, path: string, body?: any, headers: Record<string, string> = {}) {
   const server = app.listen(0);
   const addr = server.address() as any;
   const url = `http://127.0.0.1:${addr.port}${path}`;
 
   const res = await fetch(url, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(isGatedApiPath(path) && !('Authorization' in headers) ? { Authorization: `Bearer ${dashToken}` } : {}), ...headers },
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -23,6 +26,10 @@ async function req(app: Express, method: string, path: string, body?: any) {
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
 
+function authHeaders() {
+  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+}
+
 describe('Full Integration Flow', () => {
   let app: Express;
 
@@ -30,6 +37,7 @@ describe('Full Integration Flow', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
     app = createApp();
+    dashToken = mintDashboardToken();
     // Clean
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
@@ -53,15 +61,15 @@ describe('Full Integration Flow', () => {
   it('Step 2: Verify fallback chain is populated', async () => {
     const { status, body } = await req(app, 'GET', '/api/fallback');
     expect(status).toBe(200);
-    expect(body.entries.length).toBeGreaterThanOrEqual(50);
-    expect(body.entries[0]).toHaveProperty('priority');
-    expect(body.entries[0]).toHaveProperty('enabled');
+    expect(body.length).toBeGreaterThanOrEqual(50);
+    expect(body[0]).toHaveProperty('priority');
+    expect(body[0]).toHaveProperty('enabled');
   });
 
-  it('Step 3: Proxy returns 429 with no keys', async () => {
+  it('Step 3: Authenticated proxy returns 429 with no keys', async () => {
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
-    });
+    }, authHeaders());
     // 429 (all exhausted) or 502 (provider error) or 503 (no route)
     expect([429, 502, 503]).toContain(status);
     expect(body.error).toBeDefined();
@@ -98,7 +106,7 @@ describe('Full Integration Flow', () => {
 
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
-    });
+    }, authHeaders());
 
     // 502 (provider error) or 429 (all exhausted after retries)
     expect([502, 429]).toContain(status);
@@ -119,7 +127,7 @@ describe('Full Integration Flow', () => {
     expect(status).toBe(200);
 
     const { body } = await req(app, 'GET', '/api/fallback');
-    expect(body.entries[0].speedRank).toBe(1);
+    expect(body[0].speedRank).toBe(1);
   });
 
   it('Step 8: Health endpoint works', async () => {
@@ -145,12 +153,12 @@ describe('Full Integration Flow', () => {
   it('Step 10: Validate request schema', async () => {
     const { status } = await req(app, 'POST', '/v1/chat/completions', {
       messages: [], // empty
-    });
+    }, authHeaders());
     expect(status).toBe(400);
 
     const { status: s2 } = await req(app, 'POST', '/v1/chat/completions', {
       // missing messages entirely
-    });
+    }, authHeaders());
     expect(s2).toBe(400);
   });
 
@@ -158,7 +166,7 @@ describe('Full Integration Flow', () => {
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       model: 'definitely-not-a-real-model',
       messages: [{ role: 'user', content: 'hi' }],
-    });
+    }, authHeaders());
     expect(status).toBe(400);
     expect(body.error.code).toBe('model_not_found');
     expect(body.error.message).toContain('not in the catalog');
@@ -169,7 +177,7 @@ describe('Full Integration Flow', () => {
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       model: 'gemini-2.5-pro',
       messages: [{ role: 'user', content: 'hi' }],
-    });
+    }, authHeaders());
     expect(status).toBe(400);
     expect(body.error.code).toBe('model_not_found');
     expect(body.error.message).toContain('is disabled');

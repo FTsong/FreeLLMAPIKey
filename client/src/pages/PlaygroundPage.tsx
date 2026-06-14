@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Eye } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageHeader } from '@/components/page-header'
+import { Markdown } from '@/components/markdown'
+import { CopyButton } from '@/components/copy-button'
+import { useI18n } from '@/i18n'
 
 interface FallbackEntry {
   modelDbId: number
@@ -15,7 +17,6 @@ interface FallbackEntry {
   displayName: string
   sizeLabel: string
   keyCount: number
-  supportsVision: boolean
 }
 
 interface ChatMessage {
@@ -30,10 +31,13 @@ interface ChatMessage {
 }
 
 export default function PlaygroundPage() {
+  const { t } = useI18n()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [selectedModel, setSelectedModel] = useState<string>('auto')
+  const [selectedModel, setSelectedModel] = useState<string>(
+    () => localStorage.getItem('playground.model') ?? 'auto',
+  )
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -42,11 +46,10 @@ export default function PlaygroundPage() {
     queryFn: () => apiFetch('/api/settings/api-key'),
   })
 
-  const { data: fallbackChain } = useQuery<{ entries: FallbackEntry[] }>({
+  const { data: fallbackEntries = [] } = useQuery<FallbackEntry[]>({
     queryKey: ['fallback'],
     queryFn: () => apiFetch('/api/fallback'),
   })
-  const fallbackEntries = fallbackChain?.entries ?? []
 
   const availableModels = fallbackEntries.filter(e => e.keyCount > 0 && e.enabled)
 
@@ -90,7 +93,7 @@ export default function PlaygroundPage() {
         const err = await res.json().catch(() => ({ error: { message: `HTTP ${res.status}` } }))
         setMessages([...newMessages, {
           role: 'assistant',
-          content: `Error: ${err.error?.message ?? 'Unknown error'}`,
+          content: `${t('playground.errorPrefix')} ${err.error?.message ?? t('common.unknownError')}`,
         }])
         return
       }
@@ -115,7 +118,7 @@ export default function PlaygroundPage() {
     } catch (err: any) {
       setMessages([...newMessages, {
         role: 'assistant',
-        content: `Error: ${err.message}`,
+        content: `${t('playground.errorPrefix')} ${err.message}`,
       }])
     } finally {
       setLoading(false)
@@ -135,65 +138,57 @@ export default function PlaygroundPage() {
     inputRef.current?.focus()
   }
 
-  const selectedEntry = selectedModel === 'auto'
-    ? undefined
-    : availableModels.find(m => m.modelId === selectedModel)
-
   const activeModelLabel = selectedModel === 'auto'
-    ? '自动 (降级链)'
-    : selectedEntry?.displayName ?? selectedModel
+    ? t('playground.autoModel')
+    : availableModels.find(m => m.modelId === selectedModel)?.displayName ?? selectedModel
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
       <PageHeader
-        title="游乐场"
-        description="测试兼容 OpenAI 的路由器（文本和视觉）。客户端设置在「指南」标签页。"
+        title={t('playground.title')}
+        description={t('playground.description')}
         actions={
           <>
-            <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v ?? 'auto')}>
-              <SelectTrigger className="w-[280px]">
-                <span className="flex items-center gap-1.5 min-w-0">
-                  {selectedEntry?.supportsVision && (
-                    <Eye className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                  )}
-                  <SelectValue />
-                </span>
+            <Select value={selectedModel} onValueChange={(v) => { const m = v ?? 'auto'; setSelectedModel(m); localStorage.setItem('playground.model', m) }}>
+              <SelectTrigger className="w-[260px]">
+                <SelectValue />
               </SelectTrigger>
-              <SelectContent className="max-h-[min(24rem,70vh)]">
-                <SelectItem value="auto">自动 (降级链)</SelectItem>
+              <SelectContent>
+                <SelectItem value="auto">{t('playground.autoModel')}</SelectItem>
                 {availableModels.map(m => (
                   <SelectItem key={m.modelDbId} value={m.modelId}>
-                    <span className="flex items-center gap-2 min-w-0">
-                      {m.supportsVision && (
-                        <Eye
-                          className="size-3.5 shrink-0 text-muted-foreground"
-                          aria-label="支持视觉"
-                        />
-                      )}
-                      <span className="truncate">{m.displayName}</span>
-                      <span className="text-xs text-muted-foreground shrink-0">{m.platform}</span>
+                    <span className="flex items-center gap-2">
+                      <span>{m.displayName}</span>
+                      <span className="text-xs text-muted-foreground">{m.platform}</span>
                     </span>
                   </SelectItem>
                 ))}
+                {availableModels.length === 0 && (
+                  // Models only appear once a platform has an enabled key. Without
+                  // one, the list is just "Auto" and looks broken — say why. (#269)
+                  <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                    {t('playground.noModels')}
+                  </div>
+                )}
               </SelectContent>
             </Select>
             {messages.length > 0 && (
               <Button variant="outline" size="sm" onClick={handleClear}>
-                清空
+                {t('playground.clear')}
               </Button>
             )}
           </>
         }
       />
 
-      <div className="flex-1 flex flex-col rounded-lg border bg-card overflow-hidden min-h-0">
+      <div className="flex-1 flex flex-col rounded-3xl border bg-card overflow-hidden min-h-0">
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.length === 0 ? (
             <div className="flex items-center justify-center h-full text-center">
               <div className="space-y-2 max-w-sm">
-                <p className="text-base font-medium">发送一条消息开始使用。</p>
+                <p className="text-base font-medium">{t('playground.emptyTitle')}</p>
                 <p className="text-sm text-muted-foreground">
-                  正在使用 <span className="text-foreground">{activeModelLabel}</span>。在上面的选择器中切换模型。
+                  {t('playground.emptyDescription', { model: activeModelLabel })}
                 </p>
               </div>
             </div>
@@ -202,20 +197,31 @@ export default function PlaygroundPage() {
               {messages.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div
-                    className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                    className={`group relative max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                       msg.role === 'user'
                         ? 'bg-primary text-primary-foreground'
                         : 'bg-muted'
                     }`}
                   >
-                    <div className="whitespace-pre-wrap">{msg.content}</div>
+                    {msg.role === 'assistant' ? (
+                      <Markdown>{msg.content}</Markdown>
+                    ) : (
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                    )}
+                    {msg.role === 'assistant' && msg.content && (
+                      <CopyButton
+                        text={msg.content}
+                        label={t('playground.copyReply')}
+                        className="absolute right-1.5 top-1.5 size-6 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+                      />
+                    )}
                     {msg.meta && (
                       <div className="flex items-center gap-2 mt-2 flex-wrap text-[11px] opacity-70 tabular-nums">
                         {msg.meta.platform && <span>{msg.meta.platform}</span>}
                         {msg.meta.model && <span className="font-mono">· {msg.meta.model}</span>}
                         {msg.meta.latency != null && <span>· {msg.meta.latency} ms</span>}
                         {msg.meta.fallbackAttempts != null && msg.meta.fallbackAttempts > 0 && (
-                          <span>· {msg.meta.fallbackAttempts} 次回退</span>
+                          <span>· {msg.meta.fallbackAttempts} {msg.meta.fallbackAttempts > 1 ? t('playground.fallbacks') : t('playground.fallback')}</span>
                         )}
                       </div>
                     )}
@@ -245,9 +251,9 @@ export default function PlaygroundPage() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="输入消息… (⏎ 发送，⇧⏎ 换行)"
+              placeholder={t('playground.inputPlaceholder')}
               rows={1}
-              className="flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring/50 min-h-[40px] max-h-[160px]"
+              className="flex-1 resize-none rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring/50 min-h-[40px] max-h-[160px]"
               style={{ height: 'auto', overflow: 'hidden' }}
               onInput={e => {
                 const el = e.target as HTMLTextAreaElement
@@ -256,7 +262,7 @@ export default function PlaygroundPage() {
               }}
             />
             <Button onClick={handleSend} disabled={loading || !input.trim()} size="default">
-              {loading ? '发送中…' : '发送'}
+              {loading ? t('playground.sending') : t('playground.send')}
             </Button>
           </div>
         </div>
