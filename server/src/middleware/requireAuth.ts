@@ -6,6 +6,11 @@ import { validateSession } from '../services/auth.js';
 // as `Authorization: Bearer <token>`. The /v1 proxy is NOT gated by this — it
 // keeps its own unified-API-key auth for app clients.
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  if (process.env.DISABLE_DASHBOARD_AUTH === 'true') {
+    next();
+    return;
+  }
+
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
     ?? (req.headers['x-dashboard-token'] as string | undefined);
   const session = validateSession(token);

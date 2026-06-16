@@ -58,6 +58,11 @@ export function getSetting(key: string): string | undefined {
   return row?.value;
 }
 
+export function getVisionOnlyRouting(): boolean {
+  const value = getSetting('vision_only_routing');
+  return value === '1' || value === 'true';
+}
+
 export function setSetting(key: string, value: string): void {
   const db = getDb();
   db.prepare(`

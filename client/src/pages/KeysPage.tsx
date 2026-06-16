@@ -304,6 +304,14 @@ function CustomProviderSection() {
     },
   })
 
+  const fetchModels = useMutation({
+    mutationFn: (body: { baseUrl: string; apiKey?: string }) =>
+      apiFetch<{ models: string[] }>('/api/keys/custom/models', { method: 'POST', body: JSON.stringify(body) }),
+    onSuccess: data => {
+      setModel(data.models.join('\n'))
+    },
+  })
+
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!baseUrl || models.length === 0) return
@@ -334,13 +342,25 @@ function CustomProviderSection() {
           />
         </div>
         <div className="space-y-1.5">
-          <Label className="text-xs">{t('keys.customModels')}</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label className="text-xs">{t('keys.customModels')}</Label>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={!baseUrl || fetchModels.isPending}
+              onClick={() => fetchModels.mutate({ baseUrl, apiKey: apiKey || undefined })}
+            >
+              {fetchModels.isPending ? t('keys.fetchingCustomModels') : t('keys.fetchCustomModels')}
+            </Button>
+          </div>
           <Textarea
             value={model}
             onChange={e => setModel(e.target.value)}
             placeholder={'qwen3:4b\nllama3:8b'}
             rows={2}
-            className="w-[200px] font-mono text-xs"
+            className="w-[240px] font-mono text-xs"
           />
         </div>
         <div className="space-y-1.5">
@@ -367,6 +387,12 @@ function CustomProviderSection() {
           {addCustom.isPending ? t('keys.addingCustom') : multiple ? t('keys.addModels', { count: models.length }) : t('keys.addModel')}
         </Button>
       </form>
+      {fetchModels.isSuccess && (
+        <p className="text-xs text-muted-foreground mt-2">{t('keys.fetchedCustomModels', { count: fetchModels.data.models.length })}</p>
+      )}
+      {fetchModels.isError && (
+        <p className="text-destructive text-xs mt-2">{(fetchModels.error as Error).message}</p>
+      )}
       {addCustom.isError && (
         <p className="text-destructive text-xs mt-2">{(addCustom.error as Error).message}</p>
       )}

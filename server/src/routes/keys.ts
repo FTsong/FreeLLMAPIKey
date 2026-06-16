@@ -144,6 +144,70 @@ const customProviderSchema = z.object({
   { message: 'model or models is required' },
 );
 
+const customModelsProbeSchema = z.object({
+  baseUrl: z.string().url('baseUrl must be a valid URL'),
+  apiKey: z.string().optional(),
+});
+
+keysRouter.post('/custom/models', async (req: Request, res: Response) => {
+  const parsed = customModelsProbeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+
+  const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
+  const apiKey = parsed.data.apiKey?.trim();
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(`${baseUrl}/models`, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+
+    const text = await response.text();
+    let body: any = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      res.status(502).json({ error: { message: 'The endpoint returned a non-JSON /models response.' } });
+      return;
+    }
+
+    if (!response.ok) {
+      const message = body?.error?.message || body?.message || `The endpoint returned HTTP ${response.status}.`;
+      res.status(502).json({ error: { message } });
+      return;
+    }
+
+    const source = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    const seen = new Set<string>();
+    const models = source
+      .map((item: any) => typeof item === 'string' ? item : item?.id || item?.name || item?.model)
+      .filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0)
+      .map(id => id.trim())
+      .filter(id => !seen.has(id) && seen.add(id));
+
+    if (models.length === 0) {
+      res.status(502).json({ error: { message: 'No model ids were found in the /models response.' } });
+      return;
+    }
+
+    res.json({ baseUrl, models });
+  } catch (err: any) {
+    const message = err?.name === 'AbortError'
+      ? 'Timed out while fetching models from the endpoint.'
+      : err?.message || 'Failed to fetch models from the endpoint.';
+    res.status(502).json({ error: { message } });
+  }
+});
+
 keysRouter.post('/custom', (req: Request, res: Response) => {
   const parsed = customProviderSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -222,6 +286,21 @@ keysRouter.post('/custom', (req: Request, res: Response) => {
       if (!inChain) {
         const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
         db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(modelRow.id, max.m + 1);
+      }
+
+      // Keep the default profile routeable after adding custom models from the
+      // Keys page. Profile-mode routing reads profile_models, not fallback_config.
+      const defaultProfile = db.prepare("SELECT id FROM profiles WHERE type = 'default' ORDER BY sort_order, id LIMIT 1")
+        .get() as { id: number } | undefined;
+      if (defaultProfile) {
+        const inDefaultProfile = db.prepare('SELECT 1 FROM profile_models WHERE profile_id = ? AND model_db_id = ?')
+          .get(defaultProfile.id, modelRow.id);
+        if (!inDefaultProfile) {
+          const maxProfilePriority = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM profile_models WHERE profile_id = ?')
+            .get(defaultProfile.id) as { m: number };
+          db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)')
+            .run(defaultProfile.id, modelRow.id, maxProfilePriority.m + 1);
+        }
       }
 
       registered.push({ modelDbId: modelRow.id, model: modelId, displayName });

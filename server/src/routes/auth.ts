@@ -53,6 +53,15 @@ function bearer(req: Request): string | undefined {
 
 // Has the dashboard been set up yet, and is this caller authenticated?
 authRouter.get('/status', (req: Request, res: Response) => {
+  if (process.env.DISABLE_DASHBOARD_AUTH === 'true') {
+    res.json({
+      needsSetup: false,
+      authenticated: true,
+      email: 'local@dashboard',
+    });
+    return;
+  }
+
   const session = validateSession(bearer(req));
   res.json({
     needsSetup: userCount() === 0,

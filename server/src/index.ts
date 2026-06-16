@@ -26,7 +26,7 @@ async function main() {
     const display = host.includes(':') ? `[${host}]` : host;
     console.log(`Server running on http://${display}:${PORT}`);
     console.log(`Proxy endpoint: http://${display}:${PORT}/v1/chat/completions`);
-    startHealthChecker();
+    // startHealthChecker(); // Disabled by user to stop background token consumption
     startCatalogSync();
   };
 
