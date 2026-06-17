@@ -11,6 +11,7 @@ import { PageHeader } from '@/components/page-header'
 import type { ApiKey, Platform } from '../../../shared/types'
 import { Pencil, ExternalLink, Globe } from 'lucide-react'
 import { formatSqliteUtcToLocalTime } from '@/lib/utils'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { useI18n } from '@/i18n'
 
 // Small "Get API key" external link shown next to a provider (#137).
@@ -117,10 +118,12 @@ function UnifiedKeySection() {
     ? `http://${window.location.hostname}:${__SERVER_PORT__}/v1`
     : `${window.location.origin}/v1`
 
-  function copy() {
-    navigator.clipboard.writeText(apiKey)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+  async function copy() {
+    const ok = await copyTextToClipboard(apiKey)
+    if (ok) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }
   }
 
   return (

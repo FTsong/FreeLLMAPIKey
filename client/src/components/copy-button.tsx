@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Copy, Check } from 'lucide-react'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { cn } from '@/lib/utils'
 
 interface CopyButtonProps {
@@ -16,10 +17,12 @@ export function CopyButton({ text, className, label = 'Copy' }: CopyButtonProps)
     <button
       type="button"
       aria-label={copied ? 'Copied' : label}
-      onClick={() => {
-        void navigator.clipboard?.writeText(text)
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
+      onClick={async () => {
+        const ok = await copyTextToClipboard(text)
+        if (ok) {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        }
       }}
       className={cn(
         'inline-flex items-center justify-center rounded-md border bg-background/80 text-muted-foreground transition-colors hover:text-foreground',
