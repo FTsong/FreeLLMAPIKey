@@ -24,6 +24,7 @@ Aggregate the free tiers from Google, Groq, Cerebras, NVIDIA, Mistral, OpenRoute
 - [Why this exists](#why-this-exists)
 - [Supported providers](#supported-providers)
 - [Features](#features)
+- [Latest updates in this fork](#latest-updates-in-this-fork)
 - [Not yet supported](#not-yet-supported)
 - [Quick start](#quick-start)
 - [Docker](#docker)
@@ -100,6 +101,16 @@ Plus a **custom** provider — point at any OpenAI-compatible endpoint (llama.cp
 - **Context handoff on model switch** — Optional. When a session falls over to a different model, injects one compact system message so the new model knows it is continuing an existing task. Disabled by default; enable with `FREELLMAPI_CONTEXT_HANDOFF=on_model_switch`. See [Context Handoff](#context-handoff).
 - **Runs anywhere Node 20+ runs** — Windows, macOS, Linux servers, or a small ARM SBC (Raspberry Pi included). ~40 MB RSS at idle behind PM2 / systemd / whatever supervisor you prefer.
 
+## Latest updates in this fork
+
+This fork includes dashboard and routing fixes for users who download and run it locally:
+
+- **Keys page** — custom OpenAI-compatible provider entries keep their own endpoint/model configuration instead of being mixed with another custom provider.
+- **Playground** — model/provider selection works with custom providers, so test prompts can target the endpoint you configured.
+- **Analytics page** — custom provider traffic is labeled by the configured provider/model instead of collapsing under a generic or stale provider name.
+- **Fallback/model routing** — custom model entries sync with the default profile and remain available to the router after configuration changes.
+- **Clean install by default** — local runtime data such as provider keys, unified keys, request analytics, and SQLite files live under `.env` / `server/data/` and are ignored by Git. A fresh clone starts with an empty local database.
+
 ## Not yet supported
 
 The scope is deliberately narrow. If a feature isn't on this list and isn't below, assume it isn't there yet.
@@ -128,8 +139,8 @@ Prefer to read before you pipe to bash? [The script is here](https://freellmapi.
 **Prerequisites:** Docker, Docker Compose, OpenSSL.
 
 ```bash
-git clone https://github.com/tashfeenahmed/freellmapi.git
-cd freellmapi
+git clone https://github.com/FTsong/FreeLLMAPIKey.git
+cd FreeLLMAPIKey
 
 # Generate an encryption key for at-rest key storage
 ENCRYPTION_KEY="$(openssl rand -hex 32)"
@@ -153,8 +164,8 @@ Open http://localhost:3001, add your provider keys on the **Keys** page, reorder
 **Prerequisites:** Node.js 20+, npm.
 
 ```bash
-git clone https://github.com/tashfeenahmed/freellmapi.git
-cd freellmapi
+git clone https://github.com/FTsong/FreeLLMAPIKey.git
+cd FreeLLMAPIKey
 npm install
 cp .env.example .env
 ENCRYPTION_KEY="$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')"
