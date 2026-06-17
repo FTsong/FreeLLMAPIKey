@@ -286,13 +286,14 @@ function CustomProviderSection() {
   const [baseUrl, setBaseUrl] = useState('')
   const [model, setModel] = useState('')
   const [displayName, setDisplayName] = useState('')
+  const [providerLabel, setProviderLabel] = useState('')
   const [apiKey, setApiKey] = useState('')
 
   const models = parseModelList(model)
   const multiple = models.length > 1
 
   const addCustom = useMutation({
-    mutationFn: (body: { baseUrl: string; models: string[]; displayName?: string; apiKey?: string }) =>
+    mutationFn: (body: { baseUrl: string; models: string[]; displayName?: string; label?: string; apiKey?: string }) =>
       apiFetch('/api/keys/custom', { method: 'POST', body: JSON.stringify(body) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['keys'] })
@@ -301,6 +302,7 @@ function CustomProviderSection() {
       queryClient.invalidateQueries({ queryKey: ['models'] })
       setModel('')
       setDisplayName('')
+      setProviderLabel('')
     },
   })
 
@@ -321,6 +323,7 @@ function CustomProviderSection() {
       baseUrl,
       models,
       displayName: !multiple ? (displayName || undefined) : undefined,
+      label: providerLabel || undefined,
       apiKey: apiKey || undefined,
     })
   }
@@ -361,6 +364,15 @@ function CustomProviderSection() {
             placeholder={'qwen3:4b\nllama3:8b'}
             rows={2}
             className="w-[240px] font-mono text-xs"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs">{t('keys.customProviderName')}</Label>
+          <Input
+            value={providerLabel}
+            onChange={e => setProviderLabel(e.target.value)}
+            placeholder={t('keys.customProviderNamePlaceholder')}
+            className="w-[150px]"
           />
         </div>
         <div className="space-y-1.5">

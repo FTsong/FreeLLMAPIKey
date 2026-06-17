@@ -218,7 +218,7 @@ keysRouter.post('/custom', (req: Request, res: Response) => {
   const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
   // Local servers often need no key; keep a sentinel so there's always a bearer.
   const rawKey = parsed.data.apiKey?.trim() || 'no-key';
-  const label = parsed.data.label ?? 'Custom';
+  const label = parsed.data.label?.trim() || parsed.data.displayName?.trim() || 'Custom';
 
   // Flatten singular + plural inputs into one list, dedupe by model id, drop
   // blanks. The singular `displayName` only applies to a lone `model` (it can't
@@ -288,19 +288,24 @@ keysRouter.post('/custom', (req: Request, res: Response) => {
         db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(modelRow.id, max.m + 1);
       }
 
-      // Keep the default profile routeable after adding custom models from the
-      // Keys page. Profile-mode routing reads profile_models, not fallback_config.
-      const defaultProfile = db.prepare("SELECT id FROM profiles WHERE type = 'default' ORDER BY sort_order, id LIMIT 1")
-        .get() as { id: number } | undefined;
-      if (defaultProfile) {
-        const inDefaultProfile = db.prepare('SELECT 1 FROM profile_models WHERE profile_id = ? AND model_db_id = ?')
-          .get(defaultProfile.id, modelRow.id);
-        if (!inDefaultProfile) {
-          const maxProfilePriority = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM profile_models WHERE profile_id = ?')
-            .get(defaultProfile.id) as { m: number };
-          db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)')
-            .run(defaultProfile.id, modelRow.id, maxProfilePriority.m + 1);
-        }
+      // Keep profile-mode routing in sync after adding custom models from the
+      // Keys page. Auto routing reads profile_models when a profile is active,
+      // so mirror the fallback priority instead of appending behind older
+      // custom endpoints.
+      const targetProfiles = db.prepare(`
+        SELECT id FROM profiles
+        WHERE id = COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'active_profile_id'), id)
+           OR type = 'default'
+      `).all() as { id: number }[];
+      const fallbackPriority = db.prepare('SELECT priority FROM fallback_config WHERE model_db_id = ?')
+        .get(modelRow.id) as { priority: number } | undefined;
+      for (const profile of targetProfiles) {
+        db.prepare(`
+          INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
+          VALUES (?, ?, ?, 1)
+          ON CONFLICT(profile_id, model_db_id)
+          DO UPDATE SET priority = excluded.priority, enabled = 1
+        `).run(profile.id, modelRow.id, fallbackPriority?.priority ?? 9999);
       }
 
       registered.push({ modelDbId: modelRow.id, model: modelId, displayName });

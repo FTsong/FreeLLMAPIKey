@@ -29,6 +29,7 @@ interface KeyRow {
   status: string;
   enabled: number;
   base_url: string | null;
+  label: string | null;
 }
 
 // Chain row joined with the model fields the bandit needs to score it.
@@ -61,6 +62,7 @@ export interface RouteResult {
   apiKey: string;
   keyId: number;
   platform: string;
+  providerLabel: string;
   displayName: string;
   // Daily limits for this model, so a 429 handler can tell a genuine daily
   // exhaustion (escalate the cooldown) from a transient per-minute spike.
@@ -373,7 +375,7 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
   const intelMax = composites.length ? Math.max(...composites) : 0;
 
   return chain
-    .map(e => ({ e, s: scoreChainEntry(e, weights, intelMin, intelMax, true).score }))
+    .map(e => ({ e, s: scoreChainEntry(e, weights, intelMin, intelMax, false).score }))
     // Higher score first; manual priority breaks ties so the chain still matters.
     .sort((a, b) => b.s - a.s || a.e.priority - b.e.priority)
     .map(x => x.e);
@@ -670,6 +672,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         apiKey: decryptedKey,
         keyId: key.id,
         platform: entry.platform,
+        providerLabel: key.label || entry.platform,
         displayName: entry.display_name,
         rpdLimit: limits.rpd,
         tpdLimit: limits.tpd,
@@ -713,16 +716,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
   const strategy = getRoutingStrategy();
   refreshStatsCache(db);
 
-  const chain = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.size_label, m.monthly_token_budget,
-           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id
-    WHERE m.enabled = 1
-  `).all() as ChainRow[];
+  const chain = getActiveChain(db);
 
   // For display we score under 'balanced' weights when in priority mode, so the
   // table still shows a meaningful ranking even with the bandit turned off.

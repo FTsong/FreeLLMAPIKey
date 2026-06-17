@@ -151,6 +151,8 @@
     "addCustomDescription": "Point at any OpenAI-compatible endpoint: llama.cpp, LM Studio, vLLM, a local Ollama, or a remote gateway. List one model per line (or comma-separated) to add several at once; they all share the one endpoint. The API key is optional (most local servers don't need one).",
     "customBaseUrl": "Base URL",
     "customModels": "Models",
+    "customProviderName": "Provider name",
+    "customProviderNamePlaceholder": "e.g. Agnes / Qiso",
     "customDisplayName": "Display name",
     "customDisplayNamePerModel": "per-model",
     "customDisplayNameOptional": "optional",

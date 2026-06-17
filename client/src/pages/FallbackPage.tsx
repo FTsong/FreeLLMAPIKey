@@ -36,6 +36,7 @@ interface FallbackEntry {
   rateLimitHits: number
   enabled: boolean
   platform: string
+  providerLabel?: string
   modelId: string
   displayName: string
   intelligenceRank: number
@@ -360,7 +361,7 @@ function RowContent({
       <td className="py-2 pr-3 align-middle">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-medium text-sm">{row.displayName}</span>
-          <span className="text-xs text-muted-foreground">{row.platform}</span>
+          <span className="text-xs text-muted-foreground">{row.providerLabel ?? row.platform}</span>
           {row.supportsVision && (
             <span
               title={t('models.visionTitle')}
@@ -460,6 +461,7 @@ export default function FallbackPage() {
       apiFetch('/api/fallback', { method: 'PUT', body: JSON.stringify(data) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
       setLocalEntries(null)
     },
   })
@@ -467,7 +469,11 @@ export default function FallbackPage() {
   const strategyMutation = useMutation({
     mutationFn: (payload: { strategy: RoutingStrategy; weights?: RoutingWeights }) =>
       apiFetch('/api/fallback/routing', { method: 'PUT', body: JSON.stringify(payload) }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
+    onSuccess: () => {
+      setLocalEntries(null)
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
+    },
   })
 
   const strategy: RoutingStrategy = routing?.strategy ?? 'balanced'
@@ -504,10 +510,13 @@ export default function FallbackPage() {
       ...unconfigured.map((e, i) => ({ ...e, priority: reorderedVisible.length + i + 1 })),
     ]
     setLocalEntries(merged)
+    saveMutation.mutate(merged.map(e => ({ modelDbId: e.modelDbId, priority: e.priority, enabled: e.enabled })))
   }
 
   function handleToggle(modelDbId: number, enabled: boolean) {
-    setLocalEntries(allEntries.map(e => (e.modelDbId === modelDbId ? { ...e, enabled } : e)))
+    const nextEntries = allEntries.map(e => (e.modelDbId === modelDbId ? { ...e, enabled } : e))
+    setLocalEntries(nextEntries)
+    saveMutation.mutate(nextEntries.map(e => ({ modelDbId: e.modelDbId, priority: e.priority, enabled: e.enabled })))
   }
 
   function handleSave() {

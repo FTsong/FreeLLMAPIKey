@@ -57,17 +57,41 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
 // Get fallback chain (with dynamic penalties)
 fallbackRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
-  const rows = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
-           m.tpm_limit, m.tpd_limit,
-           m.monthly_token_budget, m.supports_vision, m.supports_tools
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id
-    WHERE m.enabled = 1
-    ORDER BY fc.priority ASC
-  `).all() as any[];
+  const activeProfileSetting = db.prepare("SELECT value FROM settings WHERE key = 'active_profile_id'").get() as { value: string } | undefined;
+  let rows: any[] = [];
+
+  if (activeProfileSetting) {
+    const profileId = parseInt(activeProfileSetting.value, 10);
+    rows = db.prepare(`
+      SELECT pm.model_db_id, pm.priority, pm.enabled,
+             m.platform, m.model_id, m.display_name, m.intelligence_rank,
+             m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
+             m.tpm_limit, m.tpd_limit,
+             m.monthly_token_budget, m.supports_vision, m.supports_tools,
+             COALESCE(k.label, m.platform) AS provider_label
+      FROM profile_models pm
+      JOIN models m ON m.id = pm.model_db_id
+      LEFT JOIN api_keys k ON k.id = m.key_id
+      WHERE pm.profile_id = ? AND m.enabled = 1
+      ORDER BY pm.priority ASC
+    `).all(profileId) as any[];
+  }
+
+  if (rows.length === 0) {
+    rows = db.prepare(`
+      SELECT fc.model_db_id, fc.priority, fc.enabled,
+             m.platform, m.model_id, m.display_name, m.intelligence_rank,
+             m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
+             m.tpm_limit, m.tpd_limit,
+             m.monthly_token_budget, m.supports_vision, m.supports_tools,
+             COALESCE(k.label, m.platform) AS provider_label
+      FROM fallback_config fc
+      JOIN models m ON m.id = fc.model_db_id
+      LEFT JOIN api_keys k ON k.id = m.key_id
+      WHERE m.enabled = 1
+      ORDER BY fc.priority ASC
+    `).all() as any[];
+  }
 
   // Count enabled keys per platform
   const keyCounts = db.prepare(`
@@ -91,6 +115,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       rateLimitHits: penalty?.count ?? 0,
       enabled: r.enabled === 1,
       platform: r.platform,
+      providerLabel: r.provider_label,
       modelId: r.model_id,
       displayName: r.display_name,
       intelligenceRank: r.intelligence_rank,
@@ -123,13 +148,29 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const update = db.prepare(`
+  const updateFallback = db.prepare(`
     UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?
+  `);
+  const upsertProfile = db.prepare(`
+    INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(profile_id, model_db_id)
+    DO UPDATE SET priority = excluded.priority, enabled = excluded.enabled
   `);
 
   const updateAll = db.transaction(() => {
+    const targetProfiles = db.prepare(`
+      SELECT id FROM profiles
+      WHERE id = COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'active_profile_id'), id)
+         OR type = 'default'
+    `).all() as { id: number }[];
+
     for (const entry of parsed.data) {
-      update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
+      const enabled = entry.enabled ? 1 : 0;
+      updateFallback.run(entry.priority, enabled, entry.modelDbId);
+      for (const profile of targetProfiles) {
+        upsertProfile.run(profile.id, entry.modelDbId, entry.priority, enabled);
+      }
     }
   });
   updateAll();

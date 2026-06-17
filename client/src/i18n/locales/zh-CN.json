@@ -151,6 +151,8 @@
     "addCustomDescription": "指向任意兼容 OpenAI 的端点：llama.cpp、LM Studio、vLLM、本地 Ollama 或远程网关。每行填写一个模型（或用逗号分隔）即可一次添加多个；它们共用同一个端点。API 密钥是可选的（大多数本地服务器不需要）。",
     "customBaseUrl": "Base URL",
     "customModels": "模型",
+    "customProviderName": "供应商名称",
+    "customProviderNamePlaceholder": "例如 Agnes / Qiso",
     "customDisplayName": "显示名称",
     "customDisplayNamePerModel": "按模型命名",
     "customDisplayNameOptional": "可选",

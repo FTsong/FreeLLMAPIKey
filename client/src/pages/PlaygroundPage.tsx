@@ -13,10 +13,23 @@ interface FallbackEntry {
   priority: number
   enabled: boolean
   platform: string
+  providerLabel?: string
   modelId: string
   displayName: string
   sizeLabel: string
   keyCount: number
+}
+
+type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom'
+
+interface RoutingScore {
+  modelDbId: number
+  score: number
+}
+
+interface RoutingData {
+  strategy: RoutingStrategy
+  scores: RoutingScore[]
 }
 
 interface ChatMessage {
@@ -51,7 +64,21 @@ export default function PlaygroundPage() {
     queryFn: () => apiFetch('/api/fallback'),
   })
 
-  const availableModels = fallbackEntries.filter(e => e.keyCount > 0 && e.enabled)
+  const { data: routing } = useQuery<RoutingData>({
+    queryKey: ['fallback', 'routing'],
+    queryFn: () => apiFetch('/api/fallback/routing'),
+    refetchInterval: 15_000,
+  })
+
+  const scoreRank = new Map((routing?.scores ?? []).map((s, i) => [s.modelDbId, i]))
+  const availableModels = fallbackEntries
+    .filter(e => e.keyCount > 0 && e.enabled)
+    .sort((a, b) => {
+      if (routing?.strategy && routing.strategy !== 'priority') {
+        return (scoreRank.get(a.modelDbId) ?? Number.MAX_SAFE_INTEGER) - (scoreRank.get(b.modelDbId) ?? Number.MAX_SAFE_INTEGER)
+      }
+      return a.priority - b.priority
+    })
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -159,7 +186,7 @@ export default function PlaygroundPage() {
                   <SelectItem key={m.modelDbId} value={m.modelId}>
                     <span className="flex items-center gap-2">
                       <span>{m.displayName}</span>
-                      <span className="text-xs text-muted-foreground">{m.platform}</span>
+                      <span className="text-xs text-muted-foreground">{m.providerLabel ?? m.platform}</span>
                     </span>
                   </SelectItem>
                 ))}
